@@ -135,6 +135,19 @@ namespace TestCilbox
 			}
 
 			behaviour2.Behaviour2Test();
+
+			try
+			{
+				Validator.Set("ThrowFromOtherBehaviour1", "try");
+				behaviour2.ThrowExceptionTest();
+			}
+			catch (Exception e)
+			{
+				Validator.Set("ThrowFromOtherBehaviour1", "caught");
+				Debug.Log(e.ToString());
+			}
+
+			// throw new Exception("Test");
 		}
 
 		public void Update()
@@ -165,6 +178,11 @@ namespace TestCilbox
 		{
 			Validator.Set( "Method Called On Peer", "OK" );
 			Validator.Set( "Public Field Change In Editor", pubsettee.ToString() ); // Should not be 35254
+		}
+
+		public void ThrowExceptionTest()
+		{
+			throw new Exception("Test Exception from Behaviour2");
 		}
 	}
 }

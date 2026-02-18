@@ -44,4 +44,15 @@ namespace Cilbox
 		{
 		}
 	}
+
+	public class CilboxUnhandledInterpretedException : CilboxInterpreterRuntimeException
+	{
+		public readonly object Throwee;
+
+		public CilboxUnhandledInterpretedException(string msg, object throwee, string className, string methodName, int pc) :
+			base(msg, className, methodName, pc)
+		{
+			Throwee = throwee;
+		}
+	}
 }

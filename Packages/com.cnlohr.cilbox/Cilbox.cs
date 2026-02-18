@@ -180,6 +180,14 @@ namespace Cilbox
 			try
 			{
 				ret = InterpretInner( stackBuffer, parameters ).AsObject();
+			} catch( CilboxUnhandledInterpretedException e )
+			{
+				parentClass.box.InterpreterExit();
+				string fullError = $"Unhandled interpreted exception: {e.Throwee} @ ({parentClass.className}.{methodName})";
+				Debug.LogError( fullError );
+				parentClass.box.disabledReason = fullError;
+				parentClass.box.disabled = true;
+				throw;
 			} catch( Exception e )
 			{
 				parentClass.box.InterpreterExit();
@@ -316,6 +324,7 @@ spiperf.Begin();
 					case 0x73: //newobj
 					case 0x6F: //callvirt
 					{
+						int currentInstruction = pc - 1;
 						uint bc = (b == 0x29) ? stackBuffer[sp--].u : BytecodeAsU32( ref pc );
 						object iko = null; // Returned value.
 						CilMetadataTokenInfo dt = box.metadatas[bc];
@@ -370,10 +379,17 @@ spiperf.Begin();
 								if( !targetMethod.isStatic )
 									stackBuffer[nextParameterStart] = stackBuffer[sp--];
 
-								if( !isVoid )
-									stackBuffer[++sp] = targetMethod.InterpretInner( stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
-								else
-									targetMethod.InterpretInner( stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
+								try
+								{
+									if( !isVoid )
+										stackBuffer[++sp] = targetMethod.InterpretInner( stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
+									else
+										targetMethod.InterpretInner( stackBufferIn.Slice( nextStackHead ), stackBufferIn.Slice( nextParameterStart, numParams + staticOffset ) );
+								}
+								catch (CilboxUnhandledInterpretedException e)
+								{
+									interpretedThrow(currentInstruction, e.Throwee);
+								}
 
 								if( b == 0x27 )
 								{
@@ -1157,6 +1173,11 @@ spiperf.End();
 				}
 				while( cont );
 			}
+			catch( CilboxUnhandledInterpretedException )
+			{
+				// don't break program flow for interpreted exceptions; we want to pass flow back to the outer call.
+				throw;
+			}
 			catch( Exception e )
 			{
 				string fullError = $"Breakwarn: {e.ToString()} Class: {parentClass.className}, Function: {methodName}, Bytecode: {pc}";
@@ -1187,7 +1208,7 @@ spiperf.End();
 				if (!hasExceptionClauses)
 				{
 					// todo: figure out how to re-throw to outer interpreter.
-					throw new CilboxInterpreterRuntimeException("Exception thrown with no handlers: " + thrownObj.ToString(), parentClass.className, methodName, currentInstruction);
+					throw new CilboxUnhandledInterpretedException("Exception thrown with no handlers: " + thrownObj.ToString(), thrownObj, parentClass.className, methodName, currentInstruction);
 				}
 
 				CilboxExceptionHandlingClause found = null;
@@ -1243,7 +1264,7 @@ spiperf.End();
 				if (found == null)
 				{
 					// how do I handle this?
-					throw new CilboxInterpreterRuntimeException("No handlers matched exception: " + thrownObj.ToString(), parentClass.className, methodName, currentInstruction);
+					throw new CilboxUnhandledInterpretedException("No handlers matched exception: " + thrownObj.ToString(), thrownObj, parentClass.className, methodName, currentInstruction);
 				}
 
 				leaveRegionEnqueueFinallys(currentInstruction, found.HandlerOffset, true);
