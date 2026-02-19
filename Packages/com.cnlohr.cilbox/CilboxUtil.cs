@@ -34,6 +34,7 @@ namespace Cilbox
 		Double,
 		Object,
 		Address,
+		NativeHandle,
 	}
 
 	[StructLayout(LayoutKind.Explicit)]
@@ -167,6 +168,7 @@ namespace Cilbox
 			case StackType.Double: return (double)d;
 			case StackType.Boolean: return (bool)b;
 			case StackType.Address: return Dereference();
+			// todo: handle NativeHandle somehow
 			default: return o;
 			}
 		}
@@ -188,6 +190,7 @@ namespace Cilbox
 			case StackType.Double: return (int)d;
 			case StackType.Boolean: return b ? 1 : 0;
 			case StackType.Address: return (int)Dereference();
+			// todo: handle NativeHandle somehow
 			default: return (int)o;
 			}
 		}
@@ -196,7 +199,7 @@ namespace Cilbox
 		{
 			StackType rt = StackTypeFromType( t );
 
-			if( type < StackType.Float ) 
+			if( type < StackType.Float )
 			{
 				switch( rt )
 				{
@@ -289,6 +292,7 @@ namespace Cilbox
 
 		public object Dereference()
 		{
+			// todo: should we dereference NativeHandle? If so, we would need to use the box metadata here
 			if( o.GetType() == typeof(StackElement[]) )
 				return ((StackElement[])o)[i].AsObject();
 			else
@@ -314,6 +318,7 @@ namespace Cilbox
 		// XXX RISKY - generally copy this in-place.
 		public void DereferenceLoad( object overwrite )
 		{
+			// todo: should we dereference NativeHandle? If so, we would need to use the box metadata here
 			if( o.GetType() == typeof(StackElement[]) )
 				((StackElement[])o)[i].Load( overwrite );
 			else
@@ -619,7 +624,7 @@ namespace Cilbox
 			return new Serializee( b.Slice( iStart, i - iStart ), (ElementType)len );
 		}
 	}
-	
+
 
 	public static class CilboxUtil
 	{
@@ -630,7 +635,7 @@ namespace Cilbox
 				return TypeDescriptor.GetConverter(t).ConvertFrom(sInitialize);
 			else
 			{
-				if( !t.IsPrimitive ) 
+				if( !t.IsPrimitive )
 					return null;
 				else
 					return Activator.CreateInstance(t);
