@@ -927,7 +927,7 @@ spiperf.Begin();
 						stackBuffer[sp].LoadObject( stackBuffer[sp].AsObject() );//(metaType.nativeType)stackBuffer[sp-1].AsObject();
 						break;
 					}
-					case 0x8d:
+					case 0x8d: // newarr
 					{
 						uint otyp = BytecodeAsU32( ref pc );
 						if( stackBuffer[sp].type > StackType.Ulong )
@@ -935,7 +935,6 @@ spiperf.Begin();
 						int size = stackBuffer[sp].i;
 						Type t = box.metadatas[otyp].nativeType;
 						stackBuffer[sp].LoadObject( Array.CreateInstance( t, size ) );
-						//newarr <etype>
 						break;
 					}
 					case 0x8e: // ldlen
@@ -1023,11 +1022,20 @@ spiperf.Begin();
 					}
 					case 0xA5: // unbox.any
 					{
-						uint otyp = BytecodeAsU32( ref pc ); // Let's hope that somehow this isn't needed?
+						uint otyp = BytecodeAsU32( ref pc );
 						CilMetadataTokenInfo metaType = box.metadatas[otyp];
 						if( metaType.nativeTypeIsStackType )
 						{
 							stackBuffer[sp].Unbox( stackBuffer[sp].AsObject(), metaType.nativeTypeStackType );
+						}
+						else if( metaType.nativeTypeIsGenericParameter )
+						{
+							// Generic type parameter: determine type from the actual object on the stack.
+							object obj = stackBuffer[sp].AsObject();
+							StackType st = StackElement.StackTypeFromType( obj.GetType() );
+							if( st < StackType.Object )
+								stackBuffer[sp].Unbox( obj, st );
+							// todo: confirm what to do for Address and NativeHandle
 						}
 						else
 						{
@@ -1302,6 +1310,7 @@ spiperf.End();
 		public Type nativeType; // Used for types.
 		public bool nativeTypeIsStackType;
 		public bool nativeTypeIsCilboxProxy;
+		public bool nativeTypeIsGenericParameter;
 		public StackType nativeTypeStackType;
 
 		public byte[] arrayInitializerData;
@@ -1499,35 +1508,46 @@ spiperf.End();
 				case MetaTokenType.mtType:
 				{
 					Serializee typ = st["dt"];
-					t.nativeType = usage.GetNativeTypeFromSerializee( typ );
-					StackType seType = StackElement.StackTypeFromType( t.nativeType );
-					if( seType < StackType.Object )
+					Dictionary<String, Serializee> typMap = typ.AsMap();
+					Serializee gpVal;
+					if( typMap.TryGetValue( "gp", out gpVal ) )
 					{
-						t.nativeTypeIsStackType = true;
-						t.nativeTypeStackType = seType;
-						t.Name = t.nativeType.ToString();
-					}
-					else if( t.nativeType != null )
-					{
+						t.nativeTypeIsGenericParameter = true;
 						t.isValid = true;
-						t.Name = "Type: " + typ.AsMap()["n"].AsString();
+						t.Name = typMap["n"].AsString();
 					}
 					else
 					{
-						// Maybe it's a type inside our cilbox?
-						t.isValid = false;
-						foreach( CilboxClass c in classesList )
+						t.nativeType = usage.GetNativeTypeFromSerializee( typ );
+						StackType seType = StackElement.StackTypeFromType( t.nativeType );
+						if( seType < StackType.Object )
 						{
-							if( c.className == typ.AsMap()["n"].AsString() )
-							{
-								t.Name = c.className;
-								t.nativeTypeIsCilboxProxy = true;
-								t.isValid = true;
-							}
+							t.nativeTypeIsStackType = true;
+							t.nativeTypeStackType = seType;
+							t.Name = t.nativeType.ToString();
 						}
+						else if( t.nativeType != null )
+						{
+							t.isValid = true;
+							t.Name = "Type: " + typMap["n"].AsString();
+						}
+						else
+						{
+							// Maybe it's a type inside our cilbox?
+							t.isValid = false;
+							foreach( CilboxClass c in classesList )
+							{
+								if( c.className == typMap["n"].AsString() )
+								{
+									t.Name = c.className;
+									t.nativeTypeIsCilboxProxy = true;
+									t.isValid = true;
+								}
+							}
 
-						if( !t.isValid )
-							Debug.LogError( $"Error: Could not find type: {typ.AsMap()["n"].AsString()}" );
+							if( !t.isValid )
+								Debug.LogError( $"Error parsing mbType: Could not find type: {typMap["n"].AsString()}" );
+						}
 					}
 					break;
 				}
@@ -1872,6 +1892,9 @@ spiperf.End();
 							byte [] byteCode = new byte[byteCodeIn.Length];
 							Array.Copy( byteCodeIn, byteCode, byteCodeIn.Length );
 
+							Type[] typeGenericArgs = type.IsGenericType ? type.GetGenericArguments() : Type.EmptyTypes;
+							Type[] methodGenericArgs = m.IsGenericMethod ? m.GetGenericArguments() : Type.EmptyTypes;
+
 							String sOpcodeStr = ""; int iOpcodeStrI = 0;
 							//if( !ExtractAndTransformMetas( proxyAssembly, ref ba, ref assemblyMetadata, ref assemblyMetadataReverseOriginal, ref mdcount ) ) continue;
 							//static bool ExtractAndTransformMetas( Assembly proxyAssembly, ref byte [] byteCode, ref OrderedDictionary od, ref Dictionary< uint, uint > assemblyMetadataReverseOriginal, ref int mdcount )
@@ -1923,7 +1946,7 @@ spiperf.End();
 												{
 													writebackToken = mdcount;
 													// Special <PrivateImplementationDetails>+__StaticArrayInitTypeSize=24 instance.
-													FieldInfo rf = proxyAssembly.ManifestModule.ResolveField( (int)operand );
+													FieldInfo rf = proxyAssembly.ManifestModule.ResolveField( (int)operand, typeGenericArgs, methodGenericArgs );
 													// Extract raw bytes from initializer type
 													byte[] bytes = new byte[System.Runtime.InteropServices.Marshal.SizeOf(rf.FieldType)];
 													GCHandle h = GCHandle.Alloc(rf.GetValue(null), GCHandleType.Pinned);
@@ -1979,7 +2002,7 @@ spiperf.End();
 											if( !assemblyMetadataReverseOriginal.TryGetValue( (int)operand, out writebackToken ) )
 											{
 												writebackToken = mdcount;
-												MethodBase tmb = proxyAssembly.ManifestModule.ResolveMethod( (int)operand );
+												MethodBase tmb = proxyAssembly.ManifestModule.ResolveMethod((int)operand, typeGenericArgs, methodGenericArgs);
 
 												Dictionary<String, Serializee> methodProps = new Dictionary<String, Serializee>();
 
@@ -2010,12 +2033,16 @@ spiperf.End();
 													}
 													methodProps["parameters"] = new Serializee( parametersSer );
 												}
-												methodProps["fullSignature"] = new Serializee( tmb.ToString() );
-												methodProps["isStatic"] = new Serializee( tmb.IsStatic?"1":"0" );
-												methodProps["assembly"] = new Serializee( tmb.DeclaringType.Assembly.GetName().Name );
-												methodProps["mt"] = new Serializee(((int)MetaTokenType.mtMethod).ToString());
-												originalMetaToFriendlyName[writebackToken] = tmb.DeclaringType.ToString() + "." + tmb.ToString();
-												assemblyMetadata[(mdcount++).ToString()] = new Serializee( methodProps );
+												// need to store the generic method definition if it was created
+												MethodBase sigMethod = tmb;
+												if( tmb is MethodInfo tmi && tmi.IsGenericMethod && !tmi.IsGenericMethodDefinition )
+													sigMethod = tmi.GetGenericMethodDefinition();
+												methodProps["fullSignature"] = new Serializee( sigMethod.ToString() );
+													methodProps["isStatic"] = new Serializee( tmb.IsStatic?"1":"0" );
+													methodProps["assembly"] = new Serializee( tmb.DeclaringType.Assembly.GetName().Name );
+													methodProps["mt"] = new Serializee(((int)MetaTokenType.mtMethod).ToString());
+													originalMetaToFriendlyName[writebackToken] = tmb.DeclaringType.ToString() + "." + tmb.ToString();
+													assemblyMetadata[(mdcount++).ToString()] = new Serializee( methodProps );
 											}
 										}
 										else if( ot == CilboxUtil.OpCodes.OperandType.InlineField )
@@ -2023,7 +2050,7 @@ spiperf.End();
 											if( !assemblyMetadataReverseOriginal.TryGetValue( (int)operand, out writebackToken ) )
 											{
 												writebackToken = mdcount;
-												FieldInfo rf = proxyAssembly.ManifestModule.ResolveField( (int)operand );
+												FieldInfo rf = proxyAssembly.ManifestModule.ResolveField( (int)operand, typeGenericArgs, methodGenericArgs );
 
 												Dictionary<String, Serializee> fieldProps = new Dictionary<String, Serializee>();
 												fieldProps["mt"] = new Serializee( ((int)MetaTokenType.mtField).ToString() );
@@ -2040,13 +2067,12 @@ spiperf.End();
 											if( !assemblyMetadataReverseOriginal.TryGetValue( (int)operand, out writebackToken ) )
 											{
 												writebackToken = mdcount;
-												Type ty = proxyAssembly.ManifestModule.ResolveType( (int)operand );
-
+												Type ty = proxyAssembly.ManifestModule.ResolveType( (int)operand, typeGenericArgs, methodGenericArgs );
 												Dictionary<String, Serializee> fieldProps = new Dictionary<String, Serializee>();
 												fieldProps["mt"] = new Serializee( ((int)MetaTokenType.mtType).ToString() );
 												fieldProps["dt"] = CilboxUtil.GetSerializeeFromNativeType( ty );
 												assemblyMetadata[(mdcount++).ToString()] = new Serializee( fieldProps );
-												originalMetaToFriendlyName[writebackToken] = ty.FullName;
+												originalMetaToFriendlyName[writebackToken] = ty.FullName ?? ty.Name;
 											}
 										}
 										else

@@ -901,6 +901,12 @@ namespace Cilbox
 					case MetaTokenType.mtType:
 					{
 						Serializee typ = st["dt"];
+						Dictionary<String, Serializee> typMap = typ.AsMap();
+						if( typMap.ContainsKey( "gp" ) )
+						{
+							metaLine += $"GENERIC: {typMap["n"].AsString()}";
+							break;
+						}
 						Type nt = b.usage.GetNativeTypeFromSerializee( typ );
 						StackType seType = StackElement.StackTypeFromType( nt );
 						if( seType < StackType.Object )
@@ -914,7 +920,7 @@ namespace Cilbox
 								bool bFound = false;
 								foreach( CilboxClass c in b.classesList )
 								{
-									if( c.className == typ.AsMap()["n"].AsString() )
+									if( c.className == typMap["n"].AsString() )
 									{
 										metaLine += $"PROXY: {c.className}";
 										bFound = true;
@@ -922,7 +928,7 @@ namespace Cilbox
 								}
 
 								if( !bFound )
-									throw new Exception( $"Type {typ.AsMap()["n"].AsString()} not available." );
+									throw new Exception( $"Type {typMap["n"].AsString()} not available." );
 							}
 							else
 							{
@@ -992,6 +998,12 @@ namespace Cilbox
 				for( int i = 0; i < ta.Length; i++ )
 					sg[i] = GetSerializeeFromNativeType( ta[i] );
 				ret["g"] = new Serializee( sg );
+			}
+			else if (t.IsGenericParameter || t.ContainsGenericParameters)
+			{
+				// do we need to save GetGenericParameterConstraints or other info?
+				ret["n"] = new Serializee( t.Name );
+				ret["gp"] = new Serializee( "1" );
 			}
 			else
 			{

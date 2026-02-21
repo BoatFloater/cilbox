@@ -4,9 +4,11 @@ using System.Collections.Generic;
 using System;
 using System.Collections.Specialized;
 using System.Collections;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using TestCilbox;
+using Vector3 = UnityEngine.Vector3;
 
 namespace TestCilbox
 {
@@ -65,6 +67,18 @@ namespace TestCilbox
 			Debug.Log("New derp: " + myInt );
 			Debug.Log("New testVec.y: " + testVec.y );
 
+			float[] myArr = new float[] { 1.5f, 2.5f, 3.5f };
+			Array.Resize(ref myArr, myArr.Length + 1);
+			myArr[^1] = 4.5f;
+			Validator.Set("JoinFloatArrayResized", string.Join(", ", myArr) );
+
+			float boxedFloat = 5.5f;
+			float unboxedFloat = UnboxToGeneric<float>( boxedFloat );
+			Debug.Log( "Unboxed Float: " + unboxedFloat );
+			Vector3 boxedVec = new Vector3(1, 2, 3);
+			Vector3 unboxedVec = UnboxToGeneric<Vector3>( boxedVec );
+			Debug.Log( "Unboxed Vec: " + unboxedVec.x + ", " + unboxedVec.y + ", " + unboxedVec.z );
+
 			behaviour2.Behaviour2Test();
 		}
 
@@ -108,6 +122,11 @@ namespace TestCilbox
 		{
 			Debug.Log("WriteFloat: " + value);
 			field = value;
+		}
+
+		public T UnboxToGeneric<T>(object obj)
+		{
+			return (T)obj;
 		}
 	}
 

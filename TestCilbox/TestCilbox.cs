@@ -200,6 +200,7 @@ namespace TestCilbox
 
 			Validator.Validate( "Manual Recover After Timeout", "recovered" );
 			Validator.Validate( "FixedUpdate", "called" );
+			Validator.Validate("JoinFloatArrayResized", "1.5, 2.5, 3.5, 4.5");
 
 			if( Validator.DidFail() ) return -5;
 
