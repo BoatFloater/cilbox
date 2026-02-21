@@ -23,6 +23,7 @@ namespace TestCilbox
 			"System.Byte",
 			"System.Char",
 			"System.Collections.Generic.Dictionary",
+			"System.Collections.Generic.IEnumerable",
 			"System.Double",
 			"System.DateTime",
 			"System.DayOfWeek",
