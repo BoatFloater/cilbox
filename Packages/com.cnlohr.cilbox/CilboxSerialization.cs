@@ -1,76 +1,313 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
+using System.IO;
+using System.IO.Compression;
 using System.Text;
 
 namespace Cilbox
 {
+	/// <summary>
+	/// Similar to BinaryReady/BinaryWriter but uses stack-allocated buffers to avoid heap allocations.
+	/// </summary>
+	public static class BinaryHelper
+	{
+		private static void Write7BitEncodedInt(List<byte> buf, int value)
+		{
+			uint v = (uint)value;
+			while (v >= 0x80)
+			{
+				buf.Add((byte)(v | 0x80));
+				v >>= 7;
+			}
+			buf.Add((byte)v);
+		}
+
+		private static int Read7BitEncodedInt(byte[] buf, ref int pos)
+		{
+			int result = 0, shift = 0;
+			while (true)
+			{
+				byte b = buf[pos++];
+				result |= (b & 0x7F) << shift;
+				if ((b & 0x80) == 0) break;
+				shift += 7;
+			}
+			return result;
+		}
+
+		public static int ReadInt(byte[] buf, ref int pos)
+		{
+			int v = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return v;
+		}
+
+		public static uint ReadUInt(byte[] buf, ref int pos)
+		{
+			uint v = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return v;
+		}
+
+		public static string ReadString(byte[] buf, ref int pos)
+		{
+			int len = Read7BitEncodedInt(buf, ref pos);
+			string s = Encoding.UTF8.GetString(buf, pos, len);
+			pos += len;
+			return s;
+		}
+
+		public static byte ReadByte(byte[] buf, ref int pos) => buf[pos++];
+
+		public static bool ReadBool(byte[] buf, ref int pos) => buf[pos++] != 0;
+
+		public static short ReadShort(byte[] buf, ref int pos)
+		{
+			short v = BinaryPrimitives.ReadInt16LittleEndian(buf.AsSpan(pos));
+			pos += 2;
+			return v;
+		}
+
+		public static ushort ReadUShort(byte[] buf, ref int pos)
+		{
+			ushort v = BinaryPrimitives.ReadUInt16LittleEndian(buf.AsSpan(pos));
+			pos += 2;
+			return v;
+		}
+
+		public static sbyte ReadSByte(byte[] buf, ref int pos) => (sbyte)buf[pos++];
+
+		public static long ReadLong(byte[] buf, ref int pos)
+		{
+			long v = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return v;
+		}
+
+		public static ulong ReadULong(byte[] buf, ref int pos)
+		{
+			ulong v = BinaryPrimitives.ReadUInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return v;
+		}
+
+		public static float ReadFloat(byte[] buf, ref int pos)
+		{
+			int bits = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return BitConverter.Int32BitsToSingle(bits);
+		}
+
+		public static double ReadDouble(byte[] buf, ref int pos)
+		{
+			long bits = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return BitConverter.Int64BitsToDouble(bits);
+		}
+
+		public static byte[] ReadBlob(byte[] buf, ref int pos)
+		{
+			int len = Read7BitEncodedInt(buf, ref pos);
+			byte[] b = new byte[len];
+			Buffer.BlockCopy(buf, pos, b, 0, len);
+			pos += len;
+			return b;
+		}
+
+		public static void WriteInt(List<byte> buf, int v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteUInt(List<byte> buf, uint v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteUInt32LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteString(List<byte> buf, string s)
+		{
+			int len = Encoding.UTF8.GetByteCount(s);
+			Write7BitEncodedInt(buf, len);
+			byte[] bytes = Encoding.UTF8.GetBytes(s);
+			buf.AddRange(bytes);
+		}
+
+		public static void WriteByte(List<byte> buf, byte v) => buf.Add(v);
+
+		public static void WriteBool(List<byte> buf, bool v) => buf.Add(v ? (byte)1 : (byte)0);
+
+		public static void WriteShort(List<byte> buf, short v)
+		{
+			Span<byte> tmp = stackalloc byte[2];
+			BinaryPrimitives.WriteInt16LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]);
+		}
+
+		public static void WriteUShort(List<byte> buf, ushort v)
+		{
+			Span<byte> tmp = stackalloc byte[2];
+			BinaryPrimitives.WriteUInt16LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]);
+		}
+
+		public static void WriteSByte(List<byte> buf, sbyte v) => buf.Add((byte)v);
+
+		public static void WriteLong(List<byte> buf, long v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteInt64LittleEndian(tmp, v);
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteULong(List<byte> buf, ulong v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteUInt64LittleEndian(tmp, v);
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteFloat(List<byte> buf, float v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, BitConverter.SingleToInt32Bits(v));
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteDouble(List<byte> buf, double v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteInt64LittleEndian(tmp, BitConverter.DoubleToInt64Bits(v));
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteBlob(List<byte> buf, byte[] data)
+		{
+			Write7BitEncodedInt(buf, data.Length);
+			buf.AddRange(data);
+		}
+
+		public delegate T ReadFunc<T>(byte[] buf, ref int pos);
+
+		public static T[] ReadArray<T>(byte[] buf, ref int pos, ReadFunc<T> readElement)
+		{
+			int count = ReadInt(buf, ref pos);
+			T[] arr = new T[count];
+			for (int i = 0; i < count; i++)
+				arr[i] = readElement(buf, ref pos);
+			return arr;
+		}
+
+		public static void WriteArray<T>(List<byte> buf, T[] arr, Action<T> writeElement)
+		{
+			WriteInt(buf, arr.Length);
+			for (int i = 0; i < arr.Length; i++)
+				writeElement(arr[i]);
+		}
+
+		public static byte[] CompressToBytes(byte version, Action<List<byte>> writePayload)
+		{
+			List<byte> payload = new List<byte>();
+			writePayload(payload);
+			byte[] uncompressed = payload.ToArray();
+
+			byte[] compressed;
+			using (var ms = new MemoryStream())
+			{
+				using (var deflate = new DeflateStream(ms, CompressionLevel.Optimal, leaveOpen: true))
+					deflate.Write(uncompressed, 0, uncompressed.Length);
+				compressed = ms.ToArray();
+			}
+
+			List<byte> buf = new List<byte>(1 + 4 + compressed.Length);
+			WriteByte(buf, version);
+			WriteInt(buf, uncompressed.Length);
+			buf.AddRange(compressed);
+			return buf.ToArray();
+		}
+
+		public static T DecompressAndRead<T>(byte[] data, byte expectedVersion, string formatName,
+			ReadFunc<T> readPayload)
+		{
+			int pos = 0;
+			byte version = ReadByte(data, ref pos);
+			if (version != expectedVersion)
+				throw new CilboxException($"Unsupported {formatName} binary format version {version}, expected {expectedVersion}");
+
+			int uncompressedSize = ReadInt(data, ref pos);
+			byte[] uncompressed = new byte[uncompressedSize];
+			using (var ms = new MemoryStream(data, pos, data.Length - pos))
+			using (var deflate = new DeflateStream(ms, CompressionMode.Decompress))
+			{
+				int totalRead = 0;
+				while (totalRead < uncompressedSize)
+				{
+					int read = deflate.Read(uncompressed, totalRead, uncompressedSize - totalRead);
+					if (read == 0)
+						throw new CilboxException($"Deflate stream ended early: got {totalRead} bytes, expected {uncompressedSize}");
+					totalRead += read;
+				}
+			}
+
+			int payloadpos = 0;
+			return readPayload(uncompressed, ref payloadpos);
+		}
+	}
+
 	public class SerializedTypeDescriptor
 	{
 		public string assemblyName;
 		public string typeName;
-		// Generic fields (present when genericArgs token written)
+		// Generic fields (present when isGeneric flag set)
 		public string genericName;
 		public SerializedTypeDescriptor[] genericArgs;
-		// Underlying type (present when underlyingType token written)
+		// Underlying type (present when hasUnderlyingType flag set)
 		public SerializedTypeDescriptor underlyingType;
 
 		public bool IsGeneric => genericArgs != null && genericArgs.Length > 0;
 		public bool HasUnderlyingType => underlyingType != null;
 
-		// Mirrors CilboxUtil.GetSerializeeFromNativeType key order: a, then
-		// (n, gn, g) for generics or (n, [ut]) otherwise.
-		public Serializee ToSerializee()
+		public static SerializedTypeDescriptor Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["a"] = new Serializee( assemblyName );
-			if( IsGeneric )
+			var td = new SerializedTypeDescriptor();
+			byte flags = BinaryHelper.ReadByte(buf, ref pos);
+			td.assemblyName = BinaryHelper.ReadString(buf, ref pos);
+			td.typeName = BinaryHelper.ReadString(buf, ref pos);
+			if ((flags & 1) != 0) // isGeneric
 			{
-				ret["n"] = new Serializee( typeName );
-				ret["gn"] = new Serializee( genericName );
-				Serializee[] sg = new Serializee[genericArgs.Length];
-				for( int i = 0; i < genericArgs.Length; i++ )
-					sg[i] = genericArgs[i].ToSerializee();
-				ret["g"] = new Serializee( sg );
+				td.genericName = BinaryHelper.ReadString(buf, ref pos);
+				td.genericArgs = BinaryHelper.ReadArray(buf, ref pos, Read);
 			}
-			else
+			if ((flags & 2) != 0) // hasUnderlyingType
 			{
-				ret["n"] = new Serializee( typeName );
-				if( underlyingType != null )
-					ret["ut"] = underlyingType.ToSerializee();
+				td.underlyingType = Read(buf, ref pos);
 			}
-			return new Serializee( ret );
-		}
-
-		public static SerializedTypeDescriptor FromSerializee( Serializee s )
-		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedTypeDescriptor td = new SerializedTypeDescriptor();
-			td.assemblyName = m["a"].AsString();
-			td.typeName = m["n"].AsString();
-			if( m.TryGetValue( "g", out Serializee g ) )
-			{
-				td.genericName = m["gn"].AsString();
-				Serializee[] ga = g.AsArray();
-				td.genericArgs = new SerializedTypeDescriptor[ga.Length];
-				for( int i = 0; i < ga.Length; i++ )
-					td.genericArgs[i] = FromSerializee( ga[i] );
-			}
-			if( m.TryGetValue( "ut", out Serializee ut ) )
-				td.underlyingType = FromSerializee( ut );
 			return td;
 		}
 
-		public static SerializedTypeDescriptor[] FromSerializeeArray(Serializee s)
+		public void Write(List<byte> buf)
 		{
-			Serializee[] sArr = s.AsArray();
-			SerializedTypeDescriptor[] tdArr = new SerializedTypeDescriptor[sArr.Length];
-			for (int i = 0; i < sArr.Length; i++)
+			byte flags = 0;
+			if (IsGeneric) flags |= 1;
+			if (HasUnderlyingType) flags |= 2;
+			BinaryHelper.WriteByte(buf, flags);
+			BinaryHelper.WriteString(buf, assemblyName);
+			BinaryHelper.WriteString(buf, typeName);
+			if (IsGeneric)
 			{
-				tdArr[i] = FromSerializee(sArr[i]);
+				BinaryHelper.WriteString(buf, genericName);
+				BinaryHelper.WriteArray(buf, genericArgs, e => e.Write(buf));
 			}
-			return tdArr;
+			if (HasUnderlyingType)
+			{
+				underlyingType.Write(buf);
+			}
 		}
+
 	}
 
 	public class SerializedField
@@ -78,31 +315,19 @@ namespace Cilbox
 		public string name;
 		public SerializedTypeDescriptor type;
 
-		// The same struct is serialized with two different type-key schemes:
-		//  - class fields use "type"
-		//  - method locals / parameters use "dt"
-		private Serializee ToSerializeeWithTypeKey( String typeKey )
+		public static SerializedField Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["name"] = new Serializee( name );
-			ret[typeKey] = type.ToSerializee();
-			return new Serializee( ret );
-		}
-
-		public Serializee ToClassFieldSerializee() => ToSerializeeWithTypeKey( "type" );
-		public Serializee ToMethodFieldSerializee() => ToSerializeeWithTypeKey( "dt" );
-
-		private static SerializedField FromSerializeeWithTypeKey( Serializee s, String typeKey )
-		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedField f = new SerializedField();
-			f.name = m["name"].AsString();
-			f.type = SerializedTypeDescriptor.FromSerializee( m[typeKey] );
+			var f = new SerializedField();
+			f.name = BinaryHelper.ReadString(buf, ref pos);
+			f.type = SerializedTypeDescriptor.Read(buf, ref pos);
 			return f;
 		}
 
-		public static SerializedField FromClassFieldSerializee( Serializee s ) => FromSerializeeWithTypeKey( s, "type" );
-		public static SerializedField FromMethodFieldSerializee( Serializee s ) => FromSerializeeWithTypeKey( s, "dt" );
+		public void Write(List<byte> buf)
+		{
+			BinaryHelper.WriteString(buf, name);
+			type.Write(buf);
+		}
 	}
 
 	public class SerializedExceptionHandler
@@ -115,35 +340,30 @@ namespace Cilbox
 		public bool hasCatchType;
 		public SerializedTypeDescriptor catchType;
 
-		public Serializee ToSerializee()
+		public static SerializedExceptionHandler Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["flags"] = new Serializee(flags.ToString());
-			ret["tryOff"] = new Serializee(tryOffset.ToString());
-			ret["tryLen"] = new Serializee(tryLength.ToString());
-			ret["hOff"] = new Serializee(handlerOffset.ToString());
-			ret["hLen"] = new Serializee(handlerLength.ToString());
-			if (hasCatchType)
-				ret["cType"] = catchType.ToSerializee();
-			return new Serializee(ret);
+			var eh = new SerializedExceptionHandler();
+			eh.flags = BinaryHelper.ReadInt(buf, ref pos);
+			eh.tryOffset = BinaryHelper.ReadInt(buf, ref pos);
+			eh.tryLength = BinaryHelper.ReadInt(buf, ref pos);
+			eh.handlerOffset = BinaryHelper.ReadInt(buf, ref pos);
+			eh.handlerLength = BinaryHelper.ReadInt(buf, ref pos);
+			eh.hasCatchType = BinaryHelper.ReadBool(buf, ref pos);
+			if (eh.hasCatchType)
+				eh.catchType = SerializedTypeDescriptor.Read(buf, ref pos);
+			return eh;
 		}
 
-		public static SerializedExceptionHandler FromSerializee(Serializee s)
+		public void Write(List<byte> buf)
 		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedExceptionHandler eh = new SerializedExceptionHandler();
-			eh.flags = Int32.Parse(m["flags"].AsString());
-			eh.tryOffset = Int32.Parse(m["tryOff"].AsString());
-			eh.tryLength = Int32.Parse(m["tryLen"].AsString());
-			eh.handlerOffset = Int32.Parse(m["hOff"].AsString());
-			eh.handlerLength = Int32.Parse(m["hLen"].AsString());
-			if (m.TryGetValue("cType", out Serializee cType))
-			{
-				eh.hasCatchType = true;
-				eh.catchType = SerializedTypeDescriptor.FromSerializee( cType );
-			}
-
-			return eh;
+			BinaryHelper.WriteInt(buf, flags);
+			BinaryHelper.WriteInt(buf, tryOffset);
+			BinaryHelper.WriteInt(buf, tryLength);
+			BinaryHelper.WriteInt(buf, handlerOffset);
+			BinaryHelper.WriteInt(buf, handlerLength);
+			BinaryHelper.WriteBool(buf, hasCatchType);
+			if (hasCatchType)
+				catchType.Write(buf);
 		}
 	}
 
@@ -160,89 +380,37 @@ namespace Cilbox
 		public SerializedField[] parameters;
 		public SerializedExceptionHandler[] exceptionHandlers;
 
-		// for legacy serializations, methodName is the enclosing Map key, not part of this map.
-		// Master MethodProps order: body, [eh], locals, parameters, maxStack,
-		// isVoid, isCtor, isStatic, name, fullSignature.
-		public Serializee ToSerializee()
+		public static SerializedMethod Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["body"] = Serializee.CreateFromBlob( body );
-
-			if( exceptionHandlers != null && exceptionHandlers.Length > 0 )
-			{
-				Serializee[] eh = new Serializee[exceptionHandlers.Length];
-				for( int i = 0; i < exceptionHandlers.Length; i++ )
-					eh[i] = exceptionHandlers[i].ToSerializee();
-				ret["eh"] = new Serializee( eh );
-			}
-
-			Serializee[] loc = new Serializee[locals.Length];
-			for( int i = 0; i < locals.Length; i++ )
-				loc[i] = locals[i].ToMethodFieldSerializee();
-			ret["locals"] = new Serializee( loc );
-
-			Serializee[] par = new Serializee[parameters.Length];
-			for( int i = 0; i < parameters.Length; i++ )
-				par[i] = parameters[i].ToMethodFieldSerializee();
-			ret["parameters"] = new Serializee( par );
-
-			ret["maxStack"] = new Serializee( maxStack.ToString() );
-			ret["isVoid"] = new Serializee( isVoid ? "1" : "0" );
-			ret["isCtor"] = new Serializee( isCtor ? "1" : "0" );
-			ret["isStatic"] = new Serializee( isStatic ? "1" : "0" );
-			ret["name"] = new Serializee( methodName );
-			ret["fullSignature"] = new Serializee( fullSignature );
-			return new Serializee( ret );
+			var m = new SerializedMethod();
+			m.methodName = BinaryHelper.ReadString(buf, ref pos);
+			m.maxStack = BinaryHelper.ReadInt(buf, ref pos);
+			byte flags = BinaryHelper.ReadByte(buf, ref pos);
+			m.isVoid = (flags & 1) != 0;
+			m.isStatic = (flags & 2) != 0;
+			m.isCtor = (flags & 4) != 0;
+			m.fullSignature = BinaryHelper.ReadString(buf, ref pos);
+			m.body = BinaryHelper.ReadBlob(buf, ref pos);
+			m.locals = BinaryHelper.ReadArray(buf, ref pos, SerializedField.Read);
+			m.parameters = BinaryHelper.ReadArray(buf, ref pos, SerializedField.Read);
+			m.exceptionHandlers = BinaryHelper.ReadArray(buf, ref pos, SerializedExceptionHandler.Read);
+			return m;
 		}
 
-		public static SerializedMethod FromSerializee( Serializee s, String methodName )
+		public void Write(List<byte> buf)
 		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedMethod sm = new SerializedMethod();
-			sm.methodName = methodName;
-			sm.body = m["body"].AsBlob();
-
-			if( m.TryGetValue( "eh", out Serializee ehS ) )
-			{
-				Serializee[] eh = ehS.AsArray();
-				sm.exceptionHandlers = new SerializedExceptionHandler[eh.Length];
-				for( int i = 0; i < eh.Length; i++ )
-					sm.exceptionHandlers[i] = SerializedExceptionHandler.FromSerializee( eh[i] );
-			}
-			else
-			{
-				sm.exceptionHandlers = new SerializedExceptionHandler[0];
-			}
-
-			Serializee[] loc = m["locals"].AsArray();
-			sm.locals = new SerializedField[loc.Length];
-			for( int i = 0; i < loc.Length; i++ )
-				sm.locals[i] = SerializedField.FromMethodFieldSerializee( loc[i] );
-
-			Serializee[] par = m["parameters"].AsArray();
-			sm.parameters = new SerializedField[par.Length];
-			for( int i = 0; i < par.Length; i++ )
-				sm.parameters[i] = SerializedField.FromMethodFieldSerializee( par[i] );
-
-			if( m.TryGetValue("isCtor", out Serializee isCtorSer) )
-			{
-				sm.isCtor = Convert.ToInt32(isCtorSer.AsString()) != 0;
-			}
-			else
-			{
-				// Backward compatibility for payloads generated before isCtor existed.
-				sm.isCtor = methodName == ".ctor" || methodName == ".cctor" || sm.fullSignature.StartsWith("Void .ctor(") || sm.fullSignature.StartsWith("Void .cctor(");
-			}
-
-			sm.maxStack = Int32.Parse( m["maxStack"].AsString() );
-			sm.isVoid = Int32.Parse( m["isVoid"].AsString() ) != 0;
-			sm.isStatic = Int32.Parse( m["isStatic"].AsString() ) != 0;
-			sm.fullSignature = m["fullSignature"].AsString();
-			if (m.TryGetValue( "name", out Serializee nameS))
-			{
-				sm.methodName = nameS.AsString();
-			}
-			return sm;
+			BinaryHelper.WriteString(buf, methodName);
+			BinaryHelper.WriteInt(buf, maxStack);
+			byte flags = 0;
+			if (isVoid) flags |= 1;
+			if (isStatic) flags |= 2;
+			if (isCtor) flags |= 4;
+			BinaryHelper.WriteByte(buf, flags);
+			BinaryHelper.WriteString(buf, fullSignature);
+			BinaryHelper.WriteBlob(buf, body);
+			BinaryHelper.WriteArray(buf, locals, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, parameters, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, exceptionHandlers, e => e.Write(buf));
 		}
 	}
 
@@ -252,83 +420,32 @@ namespace Cilbox
 		public SerializedField[] staticFields;
 		public SerializedField[] instanceFields;
 		public SerializedMethod[] methods;
-		public string[] baseClassNames;
 
-		// className is the enclosing Map key. Master classProps order:
-		// staticFields, instanceFields, methods (methods is a Map keyed by
-		// method name, which collapses overloads to last-value/first-position).
-		public Serializee ToSerializee()
+		public static SerializedClass Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-
-			Serializee[] sf = new Serializee[staticFields.Length];
-			for( int i = 0; i < staticFields.Length; i++ )
-				sf[i] = staticFields[i].ToClassFieldSerializee();
-			ret["staticFields"] = new Serializee( sf );
-
-			Serializee[] inf = new Serializee[instanceFields.Length];
-			for( int i = 0; i < instanceFields.Length; i++ )
-				inf[i] = instanceFields[i].ToClassFieldSerializee();
-			ret["instanceFields"] = new Serializee( inf );
-
-			Dictionary<String, Serializee> mm = new Dictionary<String, Serializee>();
-			for( int i = 0; i < methods.Length; i++ )
-				mm[methods[i].fullSignature] = methods[i].ToSerializee();
-			ret["methods"] = new Serializee( mm );
-
-			List<Serializee> bcn = new List<Serializee>();
-			foreach (string bc in baseClassNames)
-			{
-				bcn.Add(new Serializee(bc));
-			}
-			ret["baseClasses"] = new Serializee(bcn.ToArray());
-
-			return new Serializee( ret );
+			var c = new SerializedClass();
+			c.className = BinaryHelper.ReadString(buf, ref pos);
+			c.staticFields = BinaryHelper.ReadArray(buf, ref pos, SerializedField.Read);
+			c.instanceFields = BinaryHelper.ReadArray(buf, ref pos, SerializedField.Read);
+			c.methods = BinaryHelper.ReadArray(buf, ref pos, SerializedMethod.Read);
+			return c;
 		}
 
-		public static SerializedClass FromSerializee( Serializee s, String className )
+		public void Write(List<byte> buf)
 		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedClass sc = new SerializedClass();
-			sc.className = className;
-
-			Serializee[] sf = m["staticFields"].AsArray();
-			sc.staticFields = new SerializedField[sf.Length];
-			for( int i = 0; i < sf.Length; i++ )
-				sc.staticFields[i] = SerializedField.FromClassFieldSerializee( sf[i] );
-
-			Serializee[] inf = m["instanceFields"].AsArray();
-			sc.instanceFields = new SerializedField[inf.Length];
-			for( int i = 0; i < inf.Length; i++ )
-				sc.instanceFields[i] = SerializedField.FromClassFieldSerializee( inf[i] );
-
-			Dictionary<String, Serializee> mm = m["methods"].AsMap();
-			sc.methods = new SerializedMethod[mm.Count];
-			int mi = 0;
-			foreach( KeyValuePair<String, Serializee> kv in mm )
-				sc.methods[mi++] = SerializedMethod.FromSerializee( kv.Value, kv.Key );
-
-			if (m.TryGetValue("baseClasses", out Serializee baseClassesSer))
-			{
-				Serializee [] bcArr = baseClassesSer.AsArray();
-				sc.baseClassNames = new String[bcArr.Length];
-				for( int bci = 0; bci < bcArr.Length; bci++ )
-					sc.baseClassNames[bci] = bcArr[bci].AsString();
-			}
-			else
-			{
-				sc.baseClassNames = new String[0];
-			}
-
-			return sc;
+			BinaryHelper.WriteString(buf, className);
+			BinaryHelper.WriteArray(buf, staticFields, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, instanceFields, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, methods, e => e.Write(buf));
 		}
 	}
 
+	/// <summary>
+	/// Metadata token — discriminated union keyed by MetaTokenType.
+	/// Stored in a flat array indexed by integer ID.
+	/// </summary>
 	public class SerializedMetadataToken
 	{
-		// metaTokenIndex is a sequential index for the token particular to this Cilbox.
-		// Bytecode operands for this Cilbox reference this value instead of the original CIL one.
-		public int metaTokenIndex;
 		public byte metaTokenType; // MetaTokenType enum value
 
 		// mtString
@@ -337,140 +454,97 @@ namespace Cilbox
 		// mtArrayInitializer
 		public byte[] arrayInitData;
 
-		// mtType, mtField, mtMethod
-		public SerializedTypeDescriptor typeDescriptor;
-
-		// mtField, mtMethod
-		public string name;
-		public bool isStatic;
-
 		// mtField
+		public SerializedTypeDescriptor fieldDeclaringType;
+		public string fieldName;
+		public bool fieldIsStatic;
 		public bool fieldHasIndex;
 		public int fieldIndex;
 
+		// mtType
+		public SerializedTypeDescriptor typeDescriptor;
+
 		// mtMethod
+		public SerializedTypeDescriptor methodDeclaringType;
+		public string methodName;
 		public string methodFullSignature;
+		public bool methodIsStatic;
 		public string methodAssembly;
 		public SerializedTypeDescriptor[] methodParameters;
 		public SerializedTypeDescriptor[] methodGenericArguments;
 
-		public Serializee ToSerializee()
+		public static SerializedMetadataToken Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			MetaTokenType mt = (MetaTokenType)metaTokenType;
-			String mtStr = ((int)metaTokenType).ToString();
-
-			switch( mt )
-			{
-				case MetaTokenType.mtArrayInitializer:
-					ret["mt"] = new Serializee( mtStr );
-					ret["data"] = Serializee.CreateFromBlob( arrayInitData );
-					break;
-				case MetaTokenType.mtString:
-					ret["mt"] = new Serializee( mtStr );
-					ret["s"] = new Serializee( stringValue );
-					break;
-				case MetaTokenType.mtMethod:
-					// Master order: [ga], dt, name, [parameters], fullSignature,
-					// isStatic, assembly, mt (mt is written LAST for methods).
-					if( methodGenericArguments != null && methodGenericArguments.Length > 0 )
-					{
-						Serializee[] ga = new Serializee[methodGenericArguments.Length];
-						for( int i = 0; i < methodGenericArguments.Length; i++ )
-							ga[i] = methodGenericArguments[i].ToSerializee();
-						ret["ga"] = new Serializee( ga );
-					}
-					ret["dt"] = typeDescriptor.ToSerializee();
-					ret["name"] = new Serializee( name );
-					if( methodParameters != null && methodParameters.Length > 0 )
-					{
-						Serializee[] par = new Serializee[methodParameters.Length];
-						for( int i = 0; i < methodParameters.Length; i++ )
-							par[i] = methodParameters[i].ToSerializee();
-						ret["parameters"] = new Serializee( par );
-					}
-					ret["fullSignature"] = new Serializee( methodFullSignature );
-					ret["isStatic"] = new Serializee( isStatic ? "1" : "0" );
-					ret["assembly"] = new Serializee( methodAssembly );
-					ret["mt"] = new Serializee( mtStr );
-					break;
-				case MetaTokenType.mtField:
-					// Master order: mt, dt, name, isStatic, [index] (index appended last).
-					ret["mt"] = new Serializee( mtStr );
-					ret["dt"] = typeDescriptor.ToSerializee();
-					ret["name"] = new Serializee( name );
-					ret["isStatic"] = new Serializee( isStatic ? "1" : "0" );
-					if( fieldHasIndex )
-						ret["index"] = new Serializee( fieldIndex.ToString() );
-					break;
-				case MetaTokenType.mtType:
-					ret["mt"] = new Serializee( mtStr );
-					ret["dt"] = typeDescriptor.ToSerializee();
-					break;
-			}
-			return new Serializee( ret );
-		}
-
-		public static SerializedMetadataToken FromSerializee( Serializee s, string midStr )
-		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedMetadataToken t = new SerializedMetadataToken();
-			t.metaTokenIndex = Int32.Parse( midStr );
-			t.metaTokenType = (byte)Int32.Parse( m["mt"].AsString() );
+			var t = new SerializedMetadataToken();
+			t.metaTokenType = BinaryHelper.ReadByte(buf, ref pos);
 			MetaTokenType mt = (MetaTokenType)t.metaTokenType;
 
-			switch( mt )
+			switch (mt)
 			{
-				case MetaTokenType.mtArrayInitializer:
-					t.arrayInitData = m["data"].AsBlob();
-					break;
-				case MetaTokenType.mtString:
-					t.stringValue = m["s"].AsString();
-					break;
-				case MetaTokenType.mtMethod:
-					t.typeDescriptor = SerializedTypeDescriptor.FromSerializee( m["dt"] );
-					t.name = m["name"].AsString();
-					t.methodFullSignature = m["fullSignature"].AsString();
-					t.isStatic = Int32.Parse( m["isStatic"].AsString() ) != 0;
-					t.methodAssembly = m["assembly"].AsString();
-					if( m.TryGetValue( "parameters", out Serializee parS ) )
-					{
-						Serializee[] par = parS.AsArray();
-						t.methodParameters = new SerializedTypeDescriptor[par.Length];
-						for( int i = 0; i < par.Length; i++ )
-							t.methodParameters[i] = SerializedTypeDescriptor.FromSerializee( par[i] );
-					}
-					else
-					{
-						t.methodParameters = new SerializedTypeDescriptor[0];
-					}
-					if( m.TryGetValue( "ga", out Serializee gaS ) )
-					{
-						Serializee[] ga = gaS.AsArray();
-						t.methodGenericArguments = new SerializedTypeDescriptor[ga.Length];
-						for( int i = 0; i < ga.Length; i++ )
-							t.methodGenericArguments[i] = SerializedTypeDescriptor.FromSerializee( ga[i] );
-					}
-					else
-					{
-						t.methodGenericArguments = new SerializedTypeDescriptor[0];
-					}
-					break;
-				case MetaTokenType.mtField:
-					t.typeDescriptor = SerializedTypeDescriptor.FromSerializee( m["dt"] );
-					t.name = m["name"].AsString();
-					t.isStatic = Int32.Parse( m["isStatic"].AsString() ) != 0;
-					if( m.TryGetValue( "index", out Serializee idx ) )
-					{
-						t.fieldHasIndex = true;
-						t.fieldIndex = Int32.Parse( idx.AsString() );
-					}
-					break;
-				case MetaTokenType.mtType:
-					t.typeDescriptor = SerializedTypeDescriptor.FromSerializee( m["dt"] );
-					break;
+			case MetaTokenType.mtString:
+				t.stringValue = BinaryHelper.ReadString(buf, ref pos);
+				break;
+			case MetaTokenType.mtArrayInitializer:
+				t.arrayInitData = BinaryHelper.ReadBlob(buf, ref pos);
+				break;
+			case MetaTokenType.mtField:
+				t.fieldDeclaringType = SerializedTypeDescriptor.Read(buf, ref pos);
+				t.fieldName = BinaryHelper.ReadString(buf, ref pos);
+				t.fieldIsStatic = BinaryHelper.ReadBool(buf, ref pos);
+				t.fieldHasIndex = BinaryHelper.ReadBool(buf, ref pos);
+				if (t.fieldHasIndex)
+					t.fieldIndex = BinaryHelper.ReadInt(buf, ref pos);
+				break;
+			case MetaTokenType.mtType:
+				t.typeDescriptor = SerializedTypeDescriptor.Read(buf, ref pos);
+				break;
+			case MetaTokenType.mtMethod:
+				t.methodDeclaringType = SerializedTypeDescriptor.Read(buf, ref pos);
+				t.methodName = BinaryHelper.ReadString(buf, ref pos);
+				t.methodFullSignature = BinaryHelper.ReadString(buf, ref pos);
+				t.methodIsStatic = BinaryHelper.ReadBool(buf, ref pos);
+				t.methodAssembly = BinaryHelper.ReadString(buf, ref pos);
+				t.methodParameters = BinaryHelper.ReadArray(buf, ref pos, SerializedTypeDescriptor.Read);
+				t.methodGenericArguments = BinaryHelper.ReadArray(buf, ref pos, SerializedTypeDescriptor.Read);
+				break;
 			}
 			return t;
+		}
+
+		public void Write(List<byte> buf)
+		{
+			BinaryHelper.WriteByte(buf, metaTokenType);
+			MetaTokenType mt = (MetaTokenType)metaTokenType;
+
+			switch (mt)
+			{
+			case MetaTokenType.mtString:
+				BinaryHelper.WriteString(buf, stringValue);
+				break;
+			case MetaTokenType.mtArrayInitializer:
+				BinaryHelper.WriteBlob(buf, arrayInitData);
+				break;
+			case MetaTokenType.mtField:
+				fieldDeclaringType.Write(buf);
+				BinaryHelper.WriteString(buf, fieldName);
+				BinaryHelper.WriteBool(buf, fieldIsStatic);
+				BinaryHelper.WriteBool(buf, fieldHasIndex);
+				if (fieldHasIndex)
+					BinaryHelper.WriteInt(buf, fieldIndex);
+				break;
+			case MetaTokenType.mtType:
+				typeDescriptor.Write(buf);
+				break;
+			case MetaTokenType.mtMethod:
+				methodDeclaringType.Write(buf);
+				BinaryHelper.WriteString(buf, methodName);
+				BinaryHelper.WriteString(buf, methodFullSignature);
+				BinaryHelper.WriteBool(buf, methodIsStatic);
+				BinaryHelper.WriteString(buf, methodAssembly);
+				BinaryHelper.WriteArray(buf, methodParameters ?? Array.Empty<SerializedTypeDescriptor>(), e => e.Write(buf));
+				BinaryHelper.WriteArray(buf, methodGenericArguments ?? Array.Empty<SerializedTypeDescriptor>(), e => e.Write(buf));
+				break;
+			}
 		}
 	}
 
@@ -479,21 +553,18 @@ namespace Cilbox
 		public string name;
 		public long value;
 
-		public Serializee ToSerializee()
+		public static SerializedEnumValue Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["n"] = new Serializee( name );
-			ret["v"] = new Serializee( value.ToString() );
-			return new Serializee( ret );
+			var v = new SerializedEnumValue();
+			v.name = BinaryHelper.ReadString(buf, ref pos);
+			v.value = BinaryHelper.ReadLong(buf, ref pos);
+			return v;
 		}
 
-		public static SerializedEnumValue FromSerializee( Serializee s )
+		public void Write(List<byte> buf)
 		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedEnumValue v = new SerializedEnumValue();
-			v.name = m["n"].AsString();
-			v.value = Int64.Parse( m["v"].AsString() );
-			return v;
+			BinaryHelper.WriteString(buf, name);
+			BinaryHelper.WriteLong(buf, value);
 		}
 	}
 
@@ -503,98 +574,51 @@ namespace Cilbox
 		public SerializedTypeDescriptor underlyingType;
 		public SerializedEnumValue[] values;
 
-		// enumName is the enclosing Map key. Master enumProps order: ut, values.
-		public Serializee ToSerializee()
+		public static SerializedEnum Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["ut"] = underlyingType.ToSerializee();
-			Serializee[] vals = new Serializee[values.Length];
-			for( int i = 0; i < values.Length; i++ )
-				vals[i] = values[i].ToSerializee();
-			ret["values"] = new Serializee( vals );
-			return new Serializee( ret );
+			var e = new SerializedEnum();
+			e.enumName = BinaryHelper.ReadString(buf, ref pos);
+			e.underlyingType = SerializedTypeDescriptor.Read(buf, ref pos);
+			e.values = BinaryHelper.ReadArray(buf, ref pos, SerializedEnumValue.Read);
+			return e;
 		}
 
-		public static SerializedEnum FromSerializee( Serializee s, String enumName )
+		public void Write(List<byte> buf)
 		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedEnum e = new SerializedEnum();
-			e.enumName = enumName;
-			e.underlyingType = SerializedTypeDescriptor.FromSerializee( m["ut"] );
-			Serializee[] vals = m["values"].AsArray();
-			e.values = new SerializedEnumValue[vals.Length];
-			for( int i = 0; i < vals.Length; i++ )
-				e.values[i] = SerializedEnumValue.FromSerializee( vals[i] );
-			return e;
+			BinaryHelper.WriteString(buf, enumName);
+			underlyingType.Write(buf);
+			BinaryHelper.WriteArray(buf, values, e => e.Write(buf));
 		}
 	}
 
 	public class SerializedAssembly
 	{
+		public const byte FormatVersion = 1;
+
 		public SerializedClass[] classes;
-		public SerializedMetadataToken[] metadata;
+		public SerializedMetadataToken[] metadata; // index 0 is invalid/empty sentinel
 		public SerializedEnum[] enums;
 
-		// Root Map order: classes (keyed className), metadata (keyed by string
-		// token index starting at 1), enums (keyed enumName). base64 of the
-		// Serializee buffer, byte-for-byte identical to master's assemblyData.
-		public string SerializeString()
+		public static SerializedAssembly Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> root = new Dictionary<String, Serializee>();
-
-			Dictionary<String, Serializee> cl = new Dictionary<String, Serializee>();
-			for( int i = 0; i < classes.Length; i++ )
-				cl[classes[i].className] = classes[i].ToSerializee();
-			root["classes"] = new Serializee( cl );
-
-			Dictionary<String, Serializee> md = new Dictionary<String, Serializee>();
-			for( int i = 0; i < metadata.Length; i++ )
-				md[(metadata[i].metaTokenIndex).ToString()] = metadata[i].ToSerializee();
-			root["metadata"] = new Serializee( md );
-
-			Dictionary<String, Serializee> en = new Dictionary<String, Serializee>();
-			for( int i = 0; i < enums.Length; i++ )
-				en[enums[i].enumName] = enums[i].ToSerializee();
-			root["enums"] = new Serializee( en );
-
-			return Convert.ToBase64String( new Serializee( root ).DumpAsMemory().ToArray() );
-		}
-
-		public static SerializedAssembly DeserializeString( string base64 )
-		{
-			SerializedAssembly asm = new SerializedAssembly();
-			Dictionary<String, Serializee> root =
-				new Serializee( Convert.FromBase64String( base64 ), Serializee.ElementType.Map ).AsMap();
-
-			Dictionary<String, Serializee> cl = root["classes"].AsMap();
-			asm.classes = new SerializedClass[cl.Count];
-			int ci = 0;
-			foreach( KeyValuePair<String, Serializee> kv in cl )
-				asm.classes[ci++] = SerializedClass.FromSerializee( kv.Value, kv.Key );
-
-			Dictionary<String, Serializee> md = root["metadata"].AsMap();
-			asm.metadata = new SerializedMetadataToken[md.Count];
-			foreach( KeyValuePair<String, Serializee> kv in md )
-			{
-				var smt = SerializedMetadataToken.FromSerializee(kv.Value, kv.Key);
-				asm.metadata[smt.metaTokenIndex - 1] = smt; // serializee is in a 1-based dict, but store it in a regular 0-based flat array here
-			}
-
-			if( root.TryGetValue( "enums", out Serializee enumsS ) )
-			{
-				Dictionary<String, Serializee> en = enumsS.AsMap();
-				asm.enums = new SerializedEnum[en.Count];
-				int ei = 0;
-				foreach( KeyValuePair<String, Serializee> kv in en )
-					asm.enums[ei++] = SerializedEnum.FromSerializee( kv.Value, kv.Key );
-			}
-			else
-			{
-				asm.enums = new SerializedEnum[0];
-			}
-
+			var asm = new SerializedAssembly();
+			asm.classes = BinaryHelper.ReadArray(buf, ref pos, SerializedClass.Read);
+			asm.metadata = BinaryHelper.ReadArray(buf, ref pos, SerializedMetadataToken.Read);
+			asm.enums = BinaryHelper.ReadArray(buf, ref pos, SerializedEnum.Read);
 			return asm;
 		}
+
+		public void Write(List<byte> buf)
+		{
+			BinaryHelper.WriteArray(buf, classes, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, metadata, e => e.Write(buf));
+			BinaryHelper.WriteArray(buf, enums, e => e.Write(buf));
+		}
+
+		public byte[] ToBytes() => BinaryHelper.CompressToBytes(FormatVersion, Write);
+
+		public static SerializedAssembly FromBytes(byte[] data) =>
+			BinaryHelper.DecompressAndRead(data, FormatVersion, "assembly", Read);
 	}
 
 	/// <summary>
@@ -620,7 +644,6 @@ namespace Cilbox
 						sb.Append(genericDefName[i]);
 						continue;
 					}
-
 					int j = i + 1;
 					while (j < genericDefName.Length && char.IsDigit(genericDefName[j]))
 						j++;
@@ -655,47 +678,6 @@ namespace Cilbox
 		Json        = 6,  // "j" — JsonUtility-serialized struct
 	}
 
-	// Primitive-only value payload. 16 bytes (no object slot). NOTE: keep the
-	// value-slot field offsets in lockstep with StackElement (offset 8, same
-	// union layout) - the consume site copies the 8-byte `l` slot directly into
-	// StackElement.l, relying on identical bit layout for b/f/d/l/e.
-	[StructLayout(LayoutKind.Explicit)]
-	public struct PrimitivePayload
-	{
-		[FieldOffset(0)] public StackType type;
-		[FieldOffset(8)] public bool   b;
-		[FieldOffset(8)] public float  f;
-		[FieldOffset(8)] public double d;
-		[FieldOffset(8)] public long   l;
-		[FieldOffset(8)] public ulong  e;
-
-		public void Unbox( object i, StackType st )
-		{
-			type = st;
-			switch( st )
-			{
-				case StackType.Boolean: this.l = ((bool)i)?1:0; break;
-				case StackType.Sbyte:   this.l = (sbyte)i;      break;
-				case StackType.Byte:    this.e = (byte)i;       break;
-				case StackType.Short:   this.l = (short)i;      break;
-				case StackType.Ushort:  this.e = (ushort)i;     break;
-				case StackType.Int:     this.l = (int)i;        break;
-				case StackType.Uint:    this.e = (uint)i;       break;
-				case StackType.Long:    this.l = (long)i;       break;
-				case StackType.Ulong:   this.e = (ulong)i;      break;
-				case StackType.Float:   this.l = 0; this.f = (float)i;  break;
-				case StackType.Double:  this.d = (double)i;     break;
-			}
-		}
-
-		public void ToStackElement(ref StackElement se)
-		{
-			se.type = type;
-			se.l = l; // copy full 8 bytes
-			se.o = null; // clear if previously set
-		}
-	}
-
 	public class SerializedProxyField
 	{
 		public byte fieldType;            // ProxyFieldType
@@ -705,12 +687,12 @@ namespace Cilbox
 		// String / Json
 		public string data;               // value as string / JSON text
 		// Primitive
-		public PrimitivePayload primitiveValue;  // primitiveValue.type holds the StackType
+		public object primitiveValue;     // boxed primitive value (int, float, bool, etc.)
+		public byte stackType;            // sub-discriminator for Primitive (StackType byte)
 
 		// CilboxRef / ObjectRef
 		public int fieldObjectIndex;      // index into fieldsObjects
 		public bool objectRefIsNull;      // true when the original ref was null
-		public string objectRefName;      // fv.ToString() of the referenced object
 
 		// Array / Json
 		public SerializedTypeDescriptor elementType;
@@ -718,186 +700,137 @@ namespace Cilbox
 		// Array (recursive)
 		public SerializedProxyField[] arrayElements;
 
-		private static String PrimitiveToString( in PrimitivePayload v )
+		private static object ReadPrimitiveValue(byte[] buf, ref int pos, byte stackType)
 		{
-			switch( v.type )
+			switch (stackType)
 			{
-				case StackType.Boolean: return v.b.ToString();
-				case StackType.Sbyte:   return ((sbyte)v.l).ToString();
-				case StackType.Byte:    return ((byte)v.e).ToString();
-				case StackType.Short:   return ((short)v.l).ToString();
-				case StackType.Ushort:  return ((ushort)v.e).ToString();
-				case StackType.Int:     return ((int)v.l).ToString();
-				case StackType.Uint:    return ((uint)v.e).ToString();
-				case StackType.Long:    return v.l.ToString();
-				case StackType.Ulong:   return v.e.ToString();
-				case StackType.Float:   return v.f.ToString();
-				case StackType.Double:  return v.d.ToString();
-				default: throw new CilboxException( $"Unknown primitive StackType {v.type}" );
+			case 0:  return BinaryHelper.ReadBool(buf, ref pos);    // Boolean
+			case 1:  return BinaryHelper.ReadSByte(buf, ref pos);   // Sbyte
+			case 2:  return BinaryHelper.ReadByte(buf, ref pos);    // Byte
+			case 3:  return BinaryHelper.ReadShort(buf, ref pos);   // Short
+			case 4:  return BinaryHelper.ReadUShort(buf, ref pos);  // Ushort
+			case 5:  return BinaryHelper.ReadInt(buf, ref pos);     // Int
+			case 6:  return BinaryHelper.ReadUInt(buf, ref pos);    // Uint
+			case 7:  return BinaryHelper.ReadLong(buf, ref pos);    // Long
+			case 8:  return BinaryHelper.ReadULong(buf, ref pos);   // Ulong
+			case 9:  return BinaryHelper.ReadFloat(buf, ref pos);   // Float
+			case 10: return BinaryHelper.ReadDouble(buf, ref pos);  // Double
+			default: throw new CilboxException($"Unknown primitive stackType {stackType}");
 			}
 		}
 
-		private static PrimitivePayload PrimitiveFromString( String d, StackType st )
+		private static void WritePrimitiveValue(List<byte> buf, object value, byte stackType)
 		{
-			PrimitivePayload v = default;
-			v.type = st;
-			switch( st )
+			switch (stackType)
 			{
-				case StackType.Boolean: v.l = bool.Parse( d ) ? 1 : 0; break;
-				case StackType.Sbyte:   v.l = sbyte.Parse( d );        break;
-				case StackType.Byte:    v.e = byte.Parse( d );         break;
-				case StackType.Short:   v.l = short.Parse( d );        break;
-				case StackType.Ushort:  v.e = ushort.Parse( d );       break;
-				case StackType.Int:     v.l = int.Parse( d );          break;
-				case StackType.Uint:    v.e = uint.Parse( d );         break;
-				case StackType.Long:    v.l = long.Parse( d );         break;
-				case StackType.Ulong:   v.e = ulong.Parse( d );        break;
-				case StackType.Float:   v.l = 0; v.f = float.Parse( d ); break;
-				case StackType.Double:  v.d = double.Parse( d );       break;
-				default: throw new CilboxException( $"Unknown primitive StackType {st}" );
+			case 0:  BinaryHelper.WriteBool(buf, (bool)value);     break; // Boolean
+			case 1:  BinaryHelper.WriteSByte(buf, (sbyte)value);   break; // Sbyte
+			case 2:  BinaryHelper.WriteByte(buf, (byte)value);     break; // Byte
+			case 3:  BinaryHelper.WriteShort(buf, (short)value);   break; // Short
+			case 4:  BinaryHelper.WriteUShort(buf, (ushort)value); break; // Ushort
+			case 5:  BinaryHelper.WriteInt(buf, (int)value);       break; // Int
+			case 6:  BinaryHelper.WriteUInt(buf, (uint)value);     break; // Uint
+			case 7:  BinaryHelper.WriteLong(buf, (long)value);     break; // Long
+			case 8:  BinaryHelper.WriteULong(buf, (ulong)value);   break; // Ulong
+			case 9:  BinaryHelper.WriteFloat(buf, (float)value);   break; // Float
+			case 10: BinaryHelper.WriteDouble(buf, (double)value); break; // Double
+			default: throw new CilboxException($"Unknown primitive stackType {stackType}");
 			}
-			return v;
 		}
 
-		// Mirrors CilboxProxy.SerializeThing. Empty fields emit ONLY {empty:"true"}.
-		// Otherwise: [n], [miid], then type-specific keys in master's exact order.
-		public Serializee ToSerializee()
+		public static SerializedProxyField Read(byte[] buf, ref int pos)
 		{
-			Dictionary<String, Serializee> f = new Dictionary<String, Serializee>();
+			var f = new SerializedProxyField();
+			f.fieldType = BinaryHelper.ReadByte(buf, ref pos);
+			bool hasName = BinaryHelper.ReadBool(buf, ref pos);
+			if (hasName)
+				f.fieldName = BinaryHelper.ReadString(buf, ref pos);
+			f.matchingInstanceId = BinaryHelper.ReadInt(buf, ref pos);
 
-			if( (ProxyFieldType)fieldType == ProxyFieldType.Empty )
+			switch ((ProxyFieldType)f.fieldType)
 			{
-				f["empty"] = new Serializee( "true" );
-				return new Serializee( f );
-			}
-
-			if( fieldName != null )
-				f["n"] = new Serializee( fieldName );
-			if( matchingInstanceId >= 0 )
-				f["miid"] = new Serializee( matchingInstanceId.ToString() );
-
-			switch( (ProxyFieldType)fieldType )
-			{
-				case ProxyFieldType.String:
-					f["d"] = new Serializee( data );
-					f["t"] = new Serializee( "s" );
-					break;
-				case ProxyFieldType.Primitive:
-					f["d"] = new Serializee( PrimitiveToString( primitiveValue ) );
-					f["t"] = new Serializee( "e" + primitiveValue.type );
-					break;
-				case ProxyFieldType.CilboxRef:
-					f["fo"] = new Serializee( fieldObjectIndex.ToString() );
-					f["t"] = new Serializee( "cba" );
-					f["or"] = new Serializee( objectRefName );
-					break;
-				case ProxyFieldType.ObjectRef:
-					f["fo"] = new Serializee( fieldObjectIndex.ToString() );
-					f["t"] = new Serializee( "obj" );
-					f["or"] = new Serializee( objectRefName );
-					break;
-				case ProxyFieldType.Array:
-					f["t"] = new Serializee( "a" );
-					f["at"] = elementType.ToSerializee();
-					f["al"] = new Serializee( arrayElements.Length.ToString() );
-					Serializee[] ad = new Serializee[arrayElements.Length];
-					for( int i = 0; i < arrayElements.Length; i++ )
-						ad[i] = arrayElements[i].ToSerializee();
-					f["ad"] = new Serializee( ad );
-					break;
-				case ProxyFieldType.Json:
-					f["t"] = new Serializee( "j" );
-					f["d"] = new Serializee( data );
-					f["at"] = elementType.ToSerializee();
-					break;
-			}
-			return new Serializee( f );
-		}
-
-		public static SerializedProxyField FromSerializee( Serializee s )
-		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedProxyField f = new SerializedProxyField();
-			f.matchingInstanceId = -1;
-
-			if( m.ContainsKey( "empty" ) )
-			{
-				f.fieldType = (byte)ProxyFieldType.Empty;
-				return f;
-			}
-
-			if( m.TryGetValue( "n", out Serializee nS ) )
-				f.fieldName = nS.AsString();
-			if( m.TryGetValue( "miid", out Serializee miidS ) )
-				f.matchingInstanceId = Int32.Parse( miidS.AsString() );
-
-			String t = m["t"].AsString();
-			if( t == "s" )
-			{
-				f.fieldType = (byte)ProxyFieldType.String;
-				f.data = m["d"].AsString();
-			}
-			else if( t == "cba" )
-			{
-				f.fieldType = (byte)ProxyFieldType.CilboxRef;
-				f.fieldObjectIndex = Int32.Parse( m["fo"].AsString() );
-				f.objectRefName = m["or"].AsString();
-				f.objectRefIsNull = f.objectRefName == "null";
-			}
-			else if( t == "obj" )
-			{
-				f.fieldType = (byte)ProxyFieldType.ObjectRef;
-				f.fieldObjectIndex = Int32.Parse( m["fo"].AsString() );
-				f.objectRefName = m["or"].AsString();
-				f.objectRefIsNull = f.objectRefName == "null";
-			}
-			else if( t == "a" )
-			{
-				f.fieldType = (byte)ProxyFieldType.Array;
-				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
-				Serializee[] ad = m["ad"].AsArray();
-				f.arrayElements = new SerializedProxyField[ad.Length];
-				for( int i = 0; i < ad.Length; i++ )
-					f.arrayElements[i] = FromSerializee( ad[i] );
-			}
-			else if( t == "j" )
-			{
-				f.fieldType = (byte)ProxyFieldType.Json;
-				f.data = m["d"].AsString();
-				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
-			}
-			else if( t.Length > 0 && t[0] == 'e' )
-			{
-				f.fieldType = (byte)ProxyFieldType.Primitive;
-				StackType st = (StackType)Enum.Parse( typeof(StackType), t.Substring(1) );
-				f.primitiveValue = PrimitiveFromString( m["d"].AsString(), st );
+			case ProxyFieldType.Empty:
+				break;
+			case ProxyFieldType.String:
+				f.data = BinaryHelper.ReadString(buf, ref pos);
+				break;
+			case ProxyFieldType.Primitive:
+				f.stackType = BinaryHelper.ReadByte(buf, ref pos);
+				f.primitiveValue = ReadPrimitiveValue(buf, ref pos, f.stackType);
+				break;
+			case ProxyFieldType.CilboxRef:
+			case ProxyFieldType.ObjectRef:
+				f.fieldObjectIndex = BinaryHelper.ReadInt(buf, ref pos);
+				f.objectRefIsNull = BinaryHelper.ReadBool(buf, ref pos);
+				break;
+			case ProxyFieldType.Array:
+				f.elementType = SerializedTypeDescriptor.Read(buf, ref pos);
+				f.arrayElements = BinaryHelper.ReadArray(buf, ref pos, Read);
+				break;
+			case ProxyFieldType.Json:
+				f.elementType = SerializedTypeDescriptor.Read(buf, ref pos);
+				f.data = BinaryHelper.ReadString(buf, ref pos);
+				break;
 			}
 			return f;
+		}
+
+		public void Write(List<byte> buf)
+		{
+			BinaryHelper.WriteByte(buf, fieldType);
+			BinaryHelper.WriteBool(buf, fieldName != null);
+			if (fieldName != null)
+				BinaryHelper.WriteString(buf, fieldName);
+			BinaryHelper.WriteInt(buf, matchingInstanceId);
+
+			switch ((ProxyFieldType)fieldType)
+			{
+			case ProxyFieldType.Empty:
+				break;
+			case ProxyFieldType.String:
+				BinaryHelper.WriteString(buf, data);
+				break;
+			case ProxyFieldType.Primitive:
+				BinaryHelper.WriteByte(buf, stackType);
+				WritePrimitiveValue(buf, primitiveValue, stackType);
+				break;
+			case ProxyFieldType.CilboxRef:
+			case ProxyFieldType.ObjectRef:
+				BinaryHelper.WriteInt(buf, fieldObjectIndex);
+				BinaryHelper.WriteBool(buf, objectRefIsNull);
+				break;
+			case ProxyFieldType.Array:
+				elementType.Write(buf);
+				BinaryHelper.WriteArray(buf, arrayElements, e => e.Write(buf));
+				break;
+			case ProxyFieldType.Json:
+				elementType.Write(buf);
+				BinaryHelper.WriteString(buf, data);
+				break;
+			}
 		}
 	}
 
 	public class SerializedProxy
 	{
+		public const byte FormatVersion = 1;
 		public SerializedProxyField[] fields;
 
-		// Root is a List of per-field Maps, base64-encoded — identical to
-		// master's serializedObjectData.
-		public string SerializeString()
+		public static SerializedProxy Read(byte[] buf, ref int pos)
 		{
-			Serializee[] arr = new Serializee[fields.Length];
-			for( int i = 0; i < fields.Length; i++ )
-				arr[i] = fields[i].ToSerializee();
-			return Convert.ToBase64String( new Serializee( arr ).DumpAsMemory().ToArray() );
-		}
-
-		public static SerializedProxy DeserializeString( string base64 )
-		{
-			SerializedProxy p = new SerializedProxy();
-			Serializee[] arr = new Serializee( Convert.FromBase64String( base64 ), Serializee.ElementType.Map ).AsArray();
-			p.fields = new SerializedProxyField[arr.Length];
-			for( int i = 0; i < arr.Length; i++ )
-				p.fields[i] = SerializedProxyField.FromSerializee( arr[i] );
+			var p = new SerializedProxy();
+			p.fields = BinaryHelper.ReadArray(buf, ref pos, SerializedProxyField.Read);
 			return p;
 		}
+
+		public void Write(List<byte> buf)
+		{
+			BinaryHelper.WriteArray(buf, fields, e => e.Write(buf));
+		}
+
+		public byte[] ToBytes() => BinaryHelper.CompressToBytes(FormatVersion, Write);
+
+		public static SerializedProxy FromBytes(byte[] data) =>
+			BinaryHelper.DecompressAndRead(data, FormatVersion, "proxy", Read);
 	}
 }

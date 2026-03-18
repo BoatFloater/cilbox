@@ -411,7 +411,6 @@ namespace Cilbox
 			String assemblyName = td.assemblyName;
 			if( IsCilboxInternalType( typeName ) ) return null;
 			if(box.GetTypeOverride( typeName, out Type overrideType )) {
-				Debug.Log( $"{nameof(GetNativeTypeFromDescriptor)}: Override {typeName} with {overrideType.FullName}" );
 				typeName = overrideType.FullName;
 				assemblyName = overrideType.Assembly.GetName().Name;
 			}
@@ -426,11 +425,7 @@ namespace Cilbox
 				typeName = td.genericName;
 				ga = new Type[td.genericArgs.Length];
 				for( int i = 0; i < td.genericArgs.Length; i++ )
-				{
-					Type gt = GetNativeTypeFromDescriptor( td.genericArgs[i] );
-					if( gt == null ) return null;
-					ga[i] = gt;
-				}
+					ga[i] = GetNativeTypeFromDescriptor( td.genericArgs[i] );
 			}
 
 			Type ret = null;

@@ -431,256 +431,6 @@ namespace Cilbox
 		}
 	}
 
-	///////////////////////////////////////////////////////////////////////////
-	//  SERIALIZATION / DESERIALIZATION  //////////////////////////////////////
-	///////////////////////////////////////////////////////////////////////////
-
-	public class Serializee
-	{
-		private Memory<byte> buffer;
-		private ElementType e;
-
-		// TODO: Version 2: Use a string dictionary.
-		// lsb 0..2 = # of bytes to describe length or # of elements (Bytes little endian) Only #'s 0..6 are valid.
-		//     3..5 = Type
-		//
-		// When serializing, buffer does not have header.  When Deserializing, it has header.
-		//
-		// FUTURE: I would like to refactor this to use static functions to serialize/deserialize.
-
-		public enum ElementType
-		{
-			Invalid = 0,
-			String = 1,
-			List = 2,
-			Map = 3,
-			Blob = 4,
-		};
-
-		public Serializee( Memory<byte> bufferIn, ElementType eIn ) { buffer = bufferIn; e = eIn; }
-
-		public Serializee( String str ) // For serialization
-		{
-			int len = System.Text.Encoding.UTF8.GetByteCount( str );
-			byte lenBytes = ComputeLengthBytes( len );
-			byte[] bytes = new byte[len + 1 + lenBytes];
-			System.Text.Encoding.UTF8.GetBytes( str, 0, str.Length, bytes, 1 + lenBytes );
-			bytes[0] = (byte)(lenBytes | ((int)(ElementType.String)<<3));
-			buffer = new Memory<byte>(bytes);
-			FillBytesWithLength( len, lenBytes, buffer.Span.Slice(1) );
-			e = ElementType.String;
-		}
-
-		public static Serializee CreateFromBlob( byte [] bytes ) // For serialization
-		{
-			int len = bytes.Length;
-			byte lenBytes = ComputeLengthBytes( len );
-			byte [] newBytes = new byte[len + 1 + lenBytes];
-			Memory<byte> b = new Memory<byte>(newBytes);
-			FillBytesWithLength( len, lenBytes, b.Span.Slice(1) );
-			bytes.CopyTo( newBytes, 1 + lenBytes );
-			b.Span[0] = (byte)(lenBytes | ((int)(ElementType.Blob)<<3));
-			Serializee s = new Serializee( b, ElementType.Blob );
-			return s;
-		}
-
-		public Serializee( String [] listIn ) // For serialization
-		{
-			Serializee [] lst = new Serializee[listIn.Length];
-			for( int i = 0; i < lst.Length; i++ )
-				lst[i] = new Serializee( listIn[i] );
-			SetAsList( lst );
-		}
-
-		public Serializee( Serializee[] list ) // For serialization
-		{
-			SetAsList( list );
-		}
-
-		public Serializee( Dictionary<String, Serializee> dict ) // For serialization
-		{
-			Serializee [] serOut = new Serializee[dict.Count*2];
-			int n = 0;
-			foreach( KeyValuePair< String, Serializee > k in dict )
-			{
-				Serializee s = new Serializee( k.Key );
-				serOut[n++] = s;
-				serOut[n++] = k.Value;
-			}
-			SetAsList( serOut, ElementType.Map );
-		}
-
-		public Serializee( Dictionary<String, String> dict ) // For serialization
-		{
-			Serializee [] serOut = new Serializee[dict.Count*2];
-			int n = 0;
-			foreach( KeyValuePair< String, String > k in dict )
-			{
-				Serializee s = new Serializee( k.Key );
-				serOut[n++] = s;
-				s = new Serializee( k.Value );
-				serOut[n++] = s;
-			}
-			SetAsList( serOut, ElementType.Map );
-		}
-
-		// Internal function for serialization.  Remember maps are just fancy lists.
-		void SetAsList( Serializee[] list, ElementType intendedType = ElementType.List )
-		{
-			int len = 1;
-			for( int i = 0; i < list.Length; i++ )
-				len += list[i].buffer.Length;
-			byte lenElems = ComputeLengthBytes( list.Length );
-			len += lenElems;
-			int lenToEncode = len;
-			byte lenBytes = ComputeLengthBytes( lenToEncode );
-			len += lenBytes + 1;
-			byte [] bytes = new byte[len];
-			buffer = new Memory<byte>(bytes);
-
-			bytes[0] = (byte)(lenBytes | (((byte)intendedType)<<3));
-			FillBytesWithLength( lenToEncode, lenBytes, buffer.Span.Slice(1) );
-			bytes[1+lenBytes] = (byte)(lenElems | (((byte)ElementType.Invalid)<<3));
-			FillBytesWithLength( list.Length, lenElems, buffer.Span.Slice(2+lenBytes) );
-
-			int place = 2 + lenBytes + lenElems;
-			for( int i = 0; i < list.Length; i++ )
-			{
-				place += list[i].SpliceInto( buffer.Span.Slice(place) );
-			}
-			e = intendedType;
-		}
-
-		// More like dump()
-		public override String ToString()
-		{
-			String s = "";
-			for( int i = 0; i < buffer.Length; i++ )
-				s += buffer.Span[i].ToString("X2") + " ";
-			return s;
-		}
-
-		public String AsString() 	// For deserialization
-		{
-			int l = buffer.Span[0];
-			int lenBytes = l & 0x7;
-			ElementType typ = (ElementType)((l>>3)&7);
-			if( typ != ElementType.String ) throw new Exception( $"Fault, got {typ} expected String" );
-			return System.Text.Encoding.UTF8.GetString( buffer.Span.Slice( lenBytes+1 ) );
-		}
-
-		public byte[] AsBlob() 		// For deserialization
-		{
-			int l = buffer.Span[0];
-			int lenBytes = l & 0x7;
-			ElementType typ = (ElementType)((l>>3)&7);
-			if( typ != ElementType.Blob ) throw new Exception( $"Fault, got {typ} expected Blob" );
-			return buffer.Span.Slice( lenBytes+1 ).ToArray();
-		}
-
-		public Serializee[] AsArray( ElementType intendedType = ElementType.List ) // For deserialization
-		{
-			int ofs = 0;
-			(int len, ElementType typ) = PullInfo( buffer.Span, ref ofs );
-			if( typ != intendedType ) throw new Exception( $"Fault, got {typ} expected {intendedType}" );
-			(int elems, ElementType typ_dump) = PullInfo( buffer.Span, ref ofs );
-			Serializee[] ret = new Serializee[elems];
-			for( int i = 0; i < elems; i++ )
-				ret[i] = Pull( buffer, ref ofs );
-			return ret;
-		}
-
-		public Dictionary<String, Serializee> AsMap() // For deserialization
-		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			Serializee[] lst = AsArray( ElementType.Map );
-			for( int i = 0; i < lst.Length; i+=2 )
-				ret[lst[i+0].AsString()] = lst[i+1];
-			return ret;
-		}
-
-		public String[] AsStringArray() // For deserialization
-		{
-			Serializee[] lst = AsArray();
-			String[] ret = new String[lst.Length];
-			for( int i = 0; i < lst.Length; i++ )
-				ret[i] = lst[i].AsString();
-			return ret;
-		}
-
-		public Dictionary< String, String > AsStringMap() // For deserialization.
-		{
-			Dictionary<String, String> ret = new Dictionary<String, String>();
-			Serializee[] lst = AsArray( ElementType.Map );
-			for( int i = 0; i < lst.Length; i+=2 )
-				ret[lst[i+0].AsString()] = lst[i+1].AsString();
-			return ret;
-		}
-
-		public Memory<byte> DumpAsMemory() { return buffer; } // For getting a serialized buffer.
-
-		// Serialization Helpers
-		private int SpliceInto( Span<byte> si )
-		{
-			buffer.Span.CopyTo( si );
-			return buffer.Length;
-		}
-
-		static private byte ComputeLengthBytes( int len )
-		{
-			byte ret = 0;
-			do {
-				if( len == 0 ) return ret;
-				len >>= 8;
-				ret++;
-			} while( ret < 6 );
-			throw new Exception( "Invalid ComputeLengthBytes" );
-		}
-
-		static private void FillBytesWithLength( int length, int lengthBytes, Span<byte> sp )
-		{
-			if( lengthBytes > 6 ) throw new Exception( $"Invalid FillBytesWithLength {length} {lengthBytes}" );
-			for( int i = 0; i < lengthBytes; i++ )
-			{
-				sp[i] = (byte)(length&0xff);
-				length >>= 8;
-			}
-		}
-
-		// Deserialization Helpers
-		private (int, ElementType) PullInfo( Span<byte> b, ref int i )
-		{
-			if( buffer.Length <= 0 ) return ( 0, 0 );
-			byte bl = b[i++]; // info byte
-			int len = 0;
-			int lend = bl & 0x7;
-			for( int j = 0; j < lend; j++ )
-				len |= ((int)b[i++]) << (j*8);
-			return (len, (ElementType)((bl>>3)&0x7) );
-		}
-
-		// Pull off a "thing" from the bitstream.  Return is the span, -6 = string, otherwise # of elements.
-		private Serializee Pull( Memory<byte> b, ref int i )
-		{
-			//Debug.Log( ToString() );
-			Span<byte> sb = b.Span;
-			int iStart = i;
-			if( buffer.Length <= 0 ) return new Serializee( null, ElementType.Invalid );
-			byte bl = sb[i++]; // info byte
-			int len = 0;
-			int blct = bl & 0x7;
-			int etype = (bl>>3) & 0x7;
-
-			for( int j = 0; j < blct; j++ )
-				len |= ((int)sb[i++]) << (j * 8);
-
-			i += len;
-			//Debug.Log( $"Pulling {iStart} BL:{bl.ToString("X2")} {blct} {i} {len} BSL:{b.Length}" );
-			return new Serializee( b.Slice( iStart, i - iStart ), (ElementType)len );
-		}
-	}
-
-
 	public static class CilboxUtil
 	{
 		// Used both in Cilbox + CilboxProxy for getting strings of fields into objects.
@@ -748,41 +498,24 @@ namespace Cilbox
 #if UNITY_EDITOR
 
 		// This produces CilboxLog.txt
-		public static void AssemblyLoggerTask( String fileName, String assemblyData, Cilbox b )
+		public static void AssemblyLoggerTask( String fileName, byte[] assemblyBytes, Cilbox b )
 		{
 			StreamWriter CLog = File.CreateText( fileName );
-			CLog.WriteLine( "Cilbox Size: " + assemblyData.Length + " bytes." );
+			CLog.WriteLine( "Cilbox Size: " + assemblyBytes.Length + " bytes." );
 
 			try
 			{
-				b.assemblyData = assemblyData;
+				b.assemblyBytes = assemblyBytes;
 				b.BoxInitialize( true );
 
-				Dictionary< String, int > classes;
-				CilboxClass [] classesList;
+				SerializedAssembly asm = SerializedAssembly.FromBytes( assemblyBytes );
 
-				SerializedAssembly assembly = SerializedAssembly.DeserializeString(assemblyData);
-				SerializedClass[] classData = assembly.classes;
-				SerializedMetadataToken[] metaData = assembly.metadata;
-
-				int clsid = 0;
-				classes = new Dictionary< String, int >();
-				classesList = new CilboxClass[classData.Length];
-				for( int i = 0; i < classData.Length; i++ )
+				for( int ci = 0; ci < asm.classes.Length; ci++ )
 				{
-					classesList[clsid] = new CilboxClass();
-					classes[classData[i].className] = clsid;
-					clsid++;
-				}
+					SerializedClass sc = asm.classes[ci];
+					CilboxClass c = b.classesList[ci];
 
-				clsid = 0;
-				for( int cid = 0; cid < classData.Length; cid++ )
-				{
-					CilboxClass c = classesList[clsid++];
-					SerializedClass sc = classData[cid];
-					c.LoadCilboxClass( b, sc );
-
-					CLog.WriteLine( $"Class: {c.className}" );
+					CLog.WriteLine( $"Class: {sc.className}" );
 
 					String imports = "";
 					int numImportFunctions = Enum.GetNames(typeof(ImportFunctionID)).Length;
@@ -797,7 +530,7 @@ namespace Cilbox
 
 					CLog.WriteLine( "Static Fields:" );
 					for( int i = 0; i < c.staticFieldNames.Length; i++ )
-						CLog.WriteLine( $"\t{c.staticFieldTypes[i]} {c.staticFieldNames}[i]" );
+						CLog.WriteLine( $"\t{c.staticFieldTypes[i]} {c.staticFieldNames[i]}" );
 
 					CLog.WriteLine( "Instance Fields:" );
 					for( int i = 0; i < c.instanceFieldNames.Length; i++ )
@@ -821,7 +554,6 @@ namespace Cilbox
 						byte[] byteCode = m.byteCode;
 
 						int i = 0;
-						i = 0;
 						try {
 							do
 							{
@@ -923,11 +655,12 @@ namespace Cilbox
 					}
 				}
 
-				foreach( var st in metaData )
+				for( int mid = 0; mid < asm.metadata.Length; mid++ )
 				{
+					SerializedMetadataToken st = asm.metadata[mid];
 					MetaTokenType metatype = (MetaTokenType)st.metaTokenType;
 
-					String metaLine = $"\t{st.metaTokenIndex.ToString("X4")} {metatype.ToString().Substring(2),-7} ";
+					String metaLine = $"\t{(mid+1).ToString("X4")} {metatype.ToString().Substring(2),-7} ";
 
 					switch( metatype )
 					{
@@ -938,18 +671,16 @@ namespace Cilbox
 						metaLine += Convert.ToBase64String( st.arrayInitData );
 						break;
 					case MetaTokenType.mtField:
-						SerializedTypeDescriptor td = st.typeDescriptor;
-						Type t = b.usage.GetNativeTypeFromDescriptor(td);
-						if( st.isStatic ) metaLine += "static ";
+						Type t = b.usage.GetNativeTypeFromDescriptor( st.fieldDeclaringType );
+						if( st.fieldIsStatic ) metaLine += "static ";
 						String tname = t?.ToString();
 						if( t == null )
-							tname = "NR:" + td.typeName + " ";
-						metaLine += tname + st.name;
+							tname = "NR:" + st.fieldDeclaringType.typeName + " ";
+						metaLine += tname + st.fieldName;
 						break;
 					case MetaTokenType.mtType:
 					{
-						SerializedTypeDescriptor td2 = st.typeDescriptor;
-						Type nt = b.usage.GetNativeTypeFromDescriptor(td2);
+						Type nt = b.usage.GetNativeTypeFromDescriptor( st.typeDescriptor );
 						StackType seType = StackElement.StackTypeFromType( nt );
 						if( seType < StackType.Object )
 						{
@@ -962,7 +693,7 @@ namespace Cilbox
 								bool bFound = false;
 								foreach( CilboxClass c in b.classesList )
 								{
-									if( c.className == td2.typeName )
+									if( c.className == st.typeDescriptor.typeName )
 									{
 										metaLine += $"PROXY: {c.className}";
 										bFound = true;
@@ -970,7 +701,7 @@ namespace Cilbox
 								}
 
 								if( !bFound )
-									throw new Exception( $"Type {td2.typeName} not available." );
+									throw new Exception( $"Type {st.typeDescriptor.typeName} not available." );
 							}
 							else
 							{
@@ -981,7 +712,7 @@ namespace Cilbox
 					}
 					case MetaTokenType.mtMethod:
 					{
-						metaLine += $"{st.name} {st.methodFullSignature} {st.methodAssembly}";
+						metaLine += $"{st.methodName} {st.methodFullSignature} {st.methodAssembly}";
 						break;
 					}
 					}
@@ -1087,7 +818,6 @@ namespace Cilbox
 			}
 			return false;
 		}
-
 
 		///////////////////////////////////////////////////////////////////////////
 		//  DEFS FROM CECIL FOR PARSING CIL  //////////////////////////////////////
