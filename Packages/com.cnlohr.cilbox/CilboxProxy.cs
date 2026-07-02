@@ -19,6 +19,7 @@ namespace Cilbox
 		public Cilbox box;
 		public String className;
 		public String serializedObjectData;
+		public byte[] serializedObjectBytes;
 
 		public String buildTimeGuid;
 		public String initialLoadPath;
@@ -77,7 +78,7 @@ namespace Cilbox
 
 			SerializedProxy proxy = new SerializedProxy();
 			proxy.fields = lstFields.ToArray();
-			serializedObjectData = proxy.Serialize();
+			serializedObjectBytes = proxy.SerializeBinary();
 
 			buildTimeGuid = Guid.NewGuid().ToString();
 		}
@@ -174,7 +175,7 @@ namespace Cilbox
 			if( proxyWasSetup ) return;
 			if( proxyLoadInProgress ) return;
 			if (box == null) return;
-			if (serializedObjectData == null) return;
+			if ((serializedObjectBytes == null || serializedObjectBytes.Length == 0) && serializedObjectData == null) return;
 			proxyLoadInProgress = true;
 			try
 			{
@@ -243,7 +244,7 @@ namespace Cilbox
 				// Populate fields[]
 				fields = new StackElement[cls.instanceFieldNames.Length];
 
-				SerializedProxy proxyData = SerializedProxy.Deserialize( serializedObjectData );
+				SerializedProxy proxyData = SerializedProxy.Deserialize( serializedObjectBytes, serializedObjectData );
 
 				SerializedProxyField[] matchingProxyField = new SerializedProxyField[cls.instanceFieldNames.Length];
 				foreach( SerializedProxyField spf in proxyData.fields )
@@ -340,6 +341,7 @@ namespace Cilbox
 				proxyWasSetup = true;
 				runtimeFieldsObjects = null;
 				serializedObjectData = null;
+				serializedObjectBytes = null;
 				if (verboseLogging)
 					Debug.Log( $"RuntimeProxyLoad complete for class {className}" );
 			}

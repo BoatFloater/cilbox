@@ -2099,6 +2099,7 @@ spiperf.End();
 		public CilMetadataTokenInfo [] metadatas;
 		public Dictionary<string, CilboxEnum> cilboxEnums;
 		public String assemblyData;
+		public byte[] assemblyBytes;
 		private bool initialized = false;
 
 		public static readonly int defaultStackSize = 1024;
@@ -2159,13 +2160,13 @@ spiperf.End();
 			initialized = true;
 			timeoutLengthUs = desiredTimeoutLengthUs; // make sure min is applied once.
 
-			if( assemblyData == null || assemblyData.Length == 0 )
+			if( ( assemblyBytes == null || assemblyBytes.Length == 0 ) && ( assemblyData == null || assemblyData.Length == 0 ) )
 			{
 				Debug.LogError( "[Cilbox] No assembly binary data available. Did the compiler run?" );
 				return;
 			}
 
-			SerializedAssembly asm = SerializedAssembly.Deserialize( assemblyData );
+			SerializedAssembly asm = SerializedAssembly.Deserialize( assemblyBytes, assemblyData );
 
 			// Register class names first (metadata resolution needs them)
 			int clsid = 0;
@@ -3062,7 +3063,7 @@ spiperf.End();
 				serializedAssembly.classes[classIdx++] = kv.Value;
 			serializedAssembly.metadata = assemblyMetadata.ToArray();
 			serializedAssembly.enums = enumsList.ToArray();
-			String newAssemblyData = serializedAssembly.Serialize();
+			byte[] newAssemblyBytes = serializedAssembly.SerializeBinary();
 
 			perf.End(); perf = new ProfilerMarker( "Checking If Assembly Changed" ); perf.Begin();
 
@@ -3078,7 +3079,17 @@ spiperf.End();
 
 			if( tac != null )
 			{
-				if( tac.assemblyData != newAssemblyData ) EditorUtility.SetDirty( tac );
+				bool changed = false;
+				if( tac.assemblyBytes == null || tac.assemblyBytes.Length != newAssemblyBytes.Length )
+					changed = true;
+				else
+				{
+					for( int i = 0; i < newAssemblyBytes.Length; i++ )
+					{
+						if( tac.assemblyBytes[i] != newAssemblyBytes[i] ) { changed = true; break; }
+					}
+				}
+				if( changed ) EditorUtility.SetDirty( tac );
 			}
 			else
 			{
@@ -3092,10 +3103,11 @@ spiperf.End();
 
 			if( tac.exportDebuggingData )
 			{
+				byte[] logBytes = newAssemblyBytes;
 				GameObject gameObjectAsm = new GameObject("CilboxAsm " + new System.Random().Next(0,10000000));
 				Cilbox b = gameObjectAsm.AddComponent( tac.GetType() ) as Cilbox;
 				new Task( () => {
-					CilboxUtil.AssemblyLoggerTask( Application.dataPath + "/CilboxLog.txt", newAssemblyData, b );
+					CilboxUtil.AssemblyLoggerTask( Application.dataPath + "/CilboxLog.txt", newAssemblyBytes, b );
 					UnityEngine.Events.UnityAction deleter = null;
 					deleter = () => { GameObject.Destroy( gameObjectAsm ); Application.onBeforeRender -= deleter; };
 					Application.onBeforeRender += deleter;
@@ -3173,7 +3185,7 @@ spiperf.End();
 			}
 			else
 			{
-				tac.assemblyData = newAssemblyData;
+				tac.assemblyBytes = newAssemblyBytes;
 				tac.ForceReinit();
 			}
 

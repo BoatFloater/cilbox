@@ -750,17 +750,17 @@ namespace Cilbox
 #if UNITY_EDITOR
 
 		// This produces CilboxLog.txt
-		public static void AssemblyLoggerTask( String fileName, String assemblyData, Cilbox b )
+		public static void AssemblyLoggerTask( String fileName, byte[] assemblyBytes, Cilbox b )
 		{
 			StreamWriter CLog = File.CreateText( fileName );
-			CLog.WriteLine( "Cilbox Size: " + assemblyData.Length + " bytes." );
+			CLog.WriteLine( "Cilbox Size: " + assemblyBytes.Length + " bytes." );
 
 			try
 			{
-				b.assemblyData = assemblyData;
+				b.assemblyBytes = assemblyBytes;
 				b.BoxInitialize( true );
 
-				SerializedAssembly asm = SerializedAssembly.Deserialize( assemblyData );
+				SerializedAssembly asm = SerializedAssembly.Deserialize( assemblyBytes, null );
 
 				for( int ci = 0; ci < asm.classes.Length; ci++ )
 				{
