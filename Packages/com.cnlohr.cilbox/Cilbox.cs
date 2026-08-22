@@ -2106,6 +2106,22 @@ spiperf.End();
 
 			return true;
 		}
+
+		public object InterpretImportMethod(CilboxProxy proxy, int importId, object[] parameters)
+		{
+			uint index = importFunctionToId[importId];
+			if( index == 0xffffffff ) return null;
+
+			return methods[index].Interpret(proxy, parameters);
+		}
+		public object InterpretIID( CilboxProxy proxy, ImportFunctionID iid, object [] parameters ) // todo: rename?
+		{
+			return InterpretImportMethod(proxy, (int)iid, parameters);
+		}
+		public object InterpretProxyMethod(CilboxProxy proxy, int proxyMethodId, object[] parameters)
+		{
+			return InterpretImportMethod(proxy, proxyMethodId + importFunctionNames.Length, parameters);
+		}
 	}
 
 	public class CilboxEnum
@@ -2244,6 +2260,23 @@ spiperf.End();
 		abstract public bool CheckTypeAllowed( String sType );
 		abstract public bool CheckFieldAllowed( String sType, String sFieldName );
 		abstract public bool GetTypeOverride( String sType, out Type t );
+
+		protected virtual Type GetProxyComponent(MonoBehaviour m)
+		{
+			return typeof(CilboxProxy);
+		}
+
+		public CilboxProxy AddProxyComponent(MonoBehaviour m)
+		{
+			Type proxyType  = GetProxyComponent(m);
+			if (!typeof(CilboxProxy).IsAssignableFrom(proxyType))
+			{
+				Debug.LogError($"[Cilbox] can not assign non CilboxProxy as proxy behaviour.");
+				proxyType = typeof(CilboxProxy);
+			}
+
+			return (CilboxProxy)m.gameObject.AddComponent(proxyType);
+		}
 
 		public delegate void CilboxDisabledEvent( Cilbox box, string reason );
 
@@ -2521,17 +2554,6 @@ spiperf.End();
 			int clsid;
 			if( classes.TryGetValue(className, out clsid)) return classesList[clsid];
 			return null;
-		}
-
-		public object InterpretIID( CilboxClass cls, CilboxProxy ths, ImportFunctionID iid, object [] parameters )
-		{
-			if( cls == null ) return null;
-			uint index = cls.importFunctionToId[(uint)iid];
-			if( index == 0xffffffff ) return null;
-
-			object ret = cls.methods[index].Interpret( ths, parameters );
-
-			return ret;
 		}
 
 		public bool InterpreterEntry( CilboxMethod m )
@@ -3303,7 +3325,7 @@ spiperf.End();
 				if( !CilboxUtil.HasCilboxableAttribute( m.GetType() ) )
 					continue;
 
-				CilboxProxy p = g.AddComponent<CilboxProxy>();
+				CilboxProxy p = tac.AddProxyComponent(m);
 				refProxies.Add( p );
 				refProxiesOrig.Add( m );
 				refToProxyMap[m] = p;
