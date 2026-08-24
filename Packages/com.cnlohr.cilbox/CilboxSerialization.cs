@@ -1,5 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -71,6 +74,41 @@ namespace Cilbox
 			}
 			return tdArr;
 		}
+
+		/// <summary>
+		/// Reconstructs a single TD from one type-pool entry, looking children up
+		/// in the already-resolved <paramref name="typesSoFar"/> array. Used by
+		/// <see cref="BinaryHelper.DecompressAndReadPooled{T}"/> while populating
+		/// the type pool.
+		/// </summary>
+		public static SerializedTypeDescriptor ReadPoolEntry(byte[] buf, ref int pos, string[] strings, SerializedTypeDescriptor[] typesSoFar)
+		{
+			int asmIdx = BinaryHelper.Read7BitEncodedInt(buf, ref pos);
+			int typeIdx = BinaryHelper.Read7BitEncodedInt(buf, ref pos);
+			int genIdx = BinaryHelper.Read7BitEncodedInt(buf, ref pos);
+			int argCount = BinaryHelper.Read7BitEncodedInt(buf, ref pos);
+			SerializedTypeDescriptor[] args = null;
+			if (argCount > 0)
+			{
+				args = new SerializedTypeDescriptor[argCount];
+				for (int i = 0; i < argCount; i++)
+					args[i] = typesSoFar[BinaryHelper.Read7BitEncodedInt(buf, ref pos)];
+			}
+			int underIdx = BinaryHelper.Read7BitEncodedInt(buf, ref pos);
+
+			SerializedTypeDescriptor td = new SerializedTypeDescriptor
+			{
+				assemblyName = strings[asmIdx],
+				typeName = strings[typeIdx]
+			};
+			if (genIdx != 0)
+				td.genericName = strings[genIdx];
+			// argCount == 0 ⇒ genericArgs stays null, preserving IsGeneric semantics.
+			td.genericArgs = args;
+			if (underIdx != 0)
+				td.underlyingType = typesSoFar[underIdx];
+			return td;
+		}
 	}
 
 	public class SerializedField
@@ -115,6 +153,15 @@ namespace Cilbox
 		public bool hasCatchType;
 		public SerializedTypeDescriptor catchType;
 
+		public static readonly BinaryHelper.ReadFunc<SerializedExceptionHandler> ReadDelegate = ReadBinary;
+
+		const byte T_Flags = 1;
+		const byte T_TryOffset = 2;
+		const byte T_TryLength = 3;
+		const byte T_HandlerOffset = 4;
+		const byte T_HandlerLength = 5;
+		const byte T_CatchType = 6; // presence implies hasCatchType=true
+
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
@@ -144,6 +191,45 @@ namespace Cilbox
 			}
 
 			return eh;
+		}
+
+		public static SerializedExceptionHandler ReadBinary(ref ReadContext ctx)
+		{
+			SerializedExceptionHandler eh = new SerializedExceptionHandler();
+			while (true)
+			{
+				byte token = BinaryHelper.ReadFieldToken(ctx.buf, ref ctx.pos);
+				if (token == BinaryHelper.EndOfStruct) break;
+				int fieldEnd = BinaryHelper.ReadFieldLength(ctx.buf, ref ctx.pos);
+				switch (token)
+				{
+					case T_Flags: eh.flags = BinaryHelper.ReadInt(ctx.buf, ref ctx.pos); break;
+					case T_TryOffset: eh.tryOffset = BinaryHelper.ReadInt(ctx.buf, ref ctx.pos); break;
+					case T_TryLength: eh.tryLength = BinaryHelper.ReadInt(ctx.buf, ref ctx.pos); break;
+					case T_HandlerOffset: eh.handlerOffset = BinaryHelper.ReadInt(ctx.buf, ref ctx.pos); break;
+					case T_HandlerLength: eh.handlerLength = BinaryHelper.ReadInt(ctx.buf, ref ctx.pos); break;
+					case T_CatchType:
+						eh.hasCatchType = true;
+						eh.catchType = BinaryHelper.ReadPooledType(ref ctx);
+						break;
+				}
+				ctx.pos = fieldEnd;
+			}
+			return eh;
+		}
+
+		public void WriteBinary(WriteContext ctx)
+		{
+			BinaryHelper.WriteStruct(ctx, c =>
+			{
+				BinaryHelper.WriteFieldInt(c.body, T_Flags, flags);
+				BinaryHelper.WriteFieldInt(c.body, T_TryOffset, tryOffset);
+				BinaryHelper.WriteFieldInt(c.body, T_TryLength, tryLength);
+				BinaryHelper.WriteFieldInt(c.body, T_HandlerOffset, handlerOffset);
+				BinaryHelper.WriteFieldInt(c.body, T_HandlerLength, handlerLength);
+				if (hasCatchType)
+					BinaryHelper.WriteFieldPooledType(c, T_CatchType, catchType);
+			});
 		}
 	}
 
@@ -898,6 +984,598 @@ namespace Cilbox
 			for( int i = 0; i < arr.Length; i++ )
 				p.fields[i] = SerializedProxyField.FromSerializee( arr[i] );
 			return p;
+		}
+	}
+
+	/// <summary>
+	/// Mirrors the wire layout of a single type-pool entry. Captured during
+	/// <see cref="WriteContext.InternType"/> so <see cref="BinaryHelper.CompressToBytesPooled"/>
+	/// can dump entries straight to the wire without re-walking child TDs.
+	/// </summary>
+	public struct TypePoolEntry
+	{
+		public int asmIdx;
+		public int typeIdx;
+		public int genIdx;
+		public int[] argIdx; // null when not generic
+		public int underIdx;
+	}
+
+	/// <summary>
+	/// Read-side context. Carries the deflated payload buffer plus the decoded
+	/// string and type pools. Passed by ref to every Serialized*.Read method.
+	/// Cannot be boxed or used as a generic type argument — only as a ref parameter.
+	/// </summary>
+	public ref struct ReadContext
+	{
+		public byte[] buf;
+		public int pos;
+		public string[] strings;
+		public SerializedTypeDescriptor[] types;
+	}
+
+	/// <summary>
+	/// Write-side context for the deflated payload. Carries the byte buffer being
+	/// appended to plus the deduplicating string and type pools. Strings written via
+	/// the pooled helpers are emitted as 7-bit-encoded indices into <see cref="poolOrder"/>;
+	/// TD references are emitted as 7-bit-encoded indices into <see cref="typeOrder"/>.
+	/// Both pools are serialized once at the head of the deflated payload by
+	/// <see cref="BinaryHelper.CompressToBytesPooled"/>.
+	/// </summary>
+	public class WriteContext
+	{
+		public List<byte> body = new List<byte>();
+		public Dictionary<string, int> poolIndex = new Dictionary<string, int>();
+		public List<string> poolOrder = new List<string>(); // index 0 reserved for null
+
+		// Type pool. typeOrder[0] is the null sentinel; typePoolEntries[0] is the
+		// all-zero entry mirroring that slot on the wire.
+		public Dictionary<string, int> typeKeyIndex = new Dictionary<string, int>();
+		public List<SerializedTypeDescriptor> typeOrder = new List<SerializedTypeDescriptor>();
+		public List<TypePoolEntry> typePoolEntries = new List<TypePoolEntry>();
+
+		public WriteContext()
+		{
+			poolOrder.Add(null); // slot 0 is the null sentinel
+			typeOrder.Add(null);
+			typePoolEntries.Add(default); // all-zero entry
+		}
+
+		public int InternString(string s)
+		{
+			if (s == null) return 0;
+			if (poolIndex.TryGetValue(s, out int idx)) return idx;
+			idx = poolOrder.Count;
+			poolOrder.Add(s);
+			poolIndex[s] = idx;
+			return idx;
+		}
+
+		/// <summary>
+		/// Interns a type descriptor and returns its pool index. Recurses into
+		/// children first so the resulting wire layout is topologically ordered:
+		/// every child's index is strictly less than its parent's.
+		/// </summary>
+		public int InternType(SerializedTypeDescriptor td)
+		{
+			if (td == null) return 0;
+
+			// Recurse into children first so child indices are assigned before the parent.
+			int underIdx = td.HasUnderlyingType ? InternType(td.underlyingType) : 0;
+			int[] argIdx = null;
+			if (td.IsGeneric)
+			{
+				argIdx = new int[td.genericArgs.Length];
+				for (int i = 0; i < td.genericArgs.Length; i++)
+					argIdx[i] = InternType(td.genericArgs[i]);
+			}
+
+			int asmIdx = InternString(td.assemblyName);
+			int typeIdx = InternString(td.typeName);
+			int genIdx = td.IsGeneric ? InternString(td.genericName) : 0;
+
+			// Build a stable key from the resolved integer indices. Allocates a
+			// string per intern lookup; acceptable since write-side intern is not
+			// the runtime hot path.
+			var sb = new StringBuilder();
+			sb.Append(asmIdx).Append('|');
+			sb.Append(typeIdx).Append('|');
+			sb.Append(genIdx).Append('|');
+			sb.Append(underIdx).Append('|');
+			if (argIdx != null)
+			{
+				for (int i = 0; i < argIdx.Length; i++)
+				{
+					if (i > 0) sb.Append(',');
+					sb.Append(argIdx[i]);
+				}
+			}
+			string key = sb.ToString();
+
+			if (typeKeyIndex.TryGetValue(key, out int idx)) return idx;
+			idx = typeOrder.Count;
+			typeOrder.Add(td);
+			typePoolEntries.Add(new TypePoolEntry
+			{
+				asmIdx = asmIdx,
+				typeIdx = typeIdx,
+				genIdx = genIdx,
+				argIdx = argIdx,
+				underIdx = underIdx,
+			});
+			typeKeyIndex[key] = idx;
+			return idx;
+		}
+	}
+
+	/// <summary>
+	/// Similar to BinaryReady/BinaryWriter but uses stack-allocated buffers to avoid heap allocations.
+	/// </summary>
+	public static class BinaryHelper
+	{
+		public static void Write7BitEncodedInt(List<byte> buf, int value)
+		{
+			uint v = (uint)value;
+			while (v >= 0x80)
+			{
+				buf.Add((byte)(v | 0x80));
+				v >>= 7;
+			}
+			buf.Add((byte)v);
+		}
+
+		public static int Read7BitEncodedInt(byte[] buf, ref int pos)
+		{
+			int result = 0, shift = 0;
+			while (true)
+			{
+				byte b = buf[pos++];
+				result |= (b & 0x7F) << shift;
+				if ((b & 0x80) == 0) break;
+				shift += 7;
+			}
+
+			return result;
+		}
+
+		public static int ReadInt(byte[] buf, ref int pos)
+		{
+			int v = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return v;
+		}
+
+		public static uint ReadUInt(byte[] buf, ref int pos)
+		{
+			uint v = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return v;
+		}
+
+		public static string ReadString(byte[] buf, ref int pos)
+		{
+			int len = Read7BitEncodedInt(buf, ref pos);
+			string s = Encoding.UTF8.GetString(buf, pos, len);
+			pos += len;
+			return s;
+		}
+
+		public static string ReadPooledString(byte[] buf, ref int pos, string[] pool)
+			=> pool[Read7BitEncodedInt(buf, ref pos)];
+
+		public static string ReadPooledString(ref ReadContext ctx)
+			=> ctx.strings[Read7BitEncodedInt(ctx.buf, ref ctx.pos)];
+
+		public static byte ReadByte(byte[] buf, ref int pos) => buf[pos++];
+
+		public static bool ReadBool(byte[] buf, ref int pos) => buf[pos++] != 0;
+
+		public static short ReadShort(byte[] buf, ref int pos)
+		{
+			short v = BinaryPrimitives.ReadInt16LittleEndian(buf.AsSpan(pos));
+			pos += 2;
+			return v;
+		}
+
+		public static ushort ReadUShort(byte[] buf, ref int pos)
+		{
+			ushort v = BinaryPrimitives.ReadUInt16LittleEndian(buf.AsSpan(pos));
+			pos += 2;
+			return v;
+		}
+
+		public static sbyte ReadSByte(byte[] buf, ref int pos) => (sbyte)buf[pos++];
+
+		public static long ReadLong(byte[] buf, ref int pos)
+		{
+			long v = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return v;
+		}
+
+		public static ulong ReadULong(byte[] buf, ref int pos)
+		{
+			ulong v = BinaryPrimitives.ReadUInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return v;
+		}
+
+		public static float ReadFloat(byte[] buf, ref int pos)
+		{
+			int bits = BinaryPrimitives.ReadInt32LittleEndian(buf.AsSpan(pos));
+			pos += 4;
+			return BitConverter.Int32BitsToSingle(bits);
+		}
+
+		public static double ReadDouble(byte[] buf, ref int pos)
+		{
+			long bits = BinaryPrimitives.ReadInt64LittleEndian(buf.AsSpan(pos));
+			pos += 8;
+			return BitConverter.Int64BitsToDouble(bits);
+		}
+
+		public static byte[] ReadBlob(byte[] buf, ref int pos)
+		{
+			int len = Read7BitEncodedInt(buf, ref pos);
+			byte[] b = new byte[len];
+			Buffer.BlockCopy(buf, pos, b, 0, len);
+			pos += len;
+			return b;
+		}
+
+		public static void WriteInt(List<byte> buf, int v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteUInt(List<byte> buf, uint v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteUInt32LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteString(List<byte> buf, string s)
+		{
+			int len = Encoding.UTF8.GetByteCount(s);
+			Write7BitEncodedInt(buf, len);
+			byte[] bytes = Encoding.UTF8.GetBytes(s);
+			buf.AddRange(bytes);
+		}
+
+		public static void WritePooledString(WriteContext ctx, string s)
+		{
+			Write7BitEncodedInt(ctx.body, ctx.InternString(s));
+		}
+
+		public static void WritePooledType(WriteContext ctx, SerializedTypeDescriptor td)
+		{
+			Write7BitEncodedInt(ctx.body, ctx.InternType(td));
+		}
+
+		public static SerializedTypeDescriptor ReadPooledType(ref ReadContext ctx)
+			=> ctx.types[Read7BitEncodedInt(ctx.buf, ref ctx.pos)];
+
+		public static void WriteByte(List<byte> buf, byte v) => buf.Add(v);
+
+		public static void WriteBool(List<byte> buf, bool v) => buf.Add(v ? (byte)1 : (byte)0);
+
+		public static void WriteShort(List<byte> buf, short v)
+		{
+			Span<byte> tmp = stackalloc byte[2];
+			BinaryPrimitives.WriteInt16LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]);
+		}
+
+		public static void WriteUShort(List<byte> buf, ushort v)
+		{
+			Span<byte> tmp = stackalloc byte[2];
+			BinaryPrimitives.WriteUInt16LittleEndian(tmp, v);
+			buf.Add(tmp[0]); buf.Add(tmp[1]);
+		}
+
+		public static void WriteSByte(List<byte> buf, sbyte v) => buf.Add((byte)v);
+
+		public static void WriteLong(List<byte> buf, long v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteInt64LittleEndian(tmp, v);
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteULong(List<byte> buf, ulong v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteUInt64LittleEndian(tmp, v);
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteFloat(List<byte> buf, float v)
+		{
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, BitConverter.SingleToInt32Bits(v));
+			buf.Add(tmp[0]); buf.Add(tmp[1]); buf.Add(tmp[2]); buf.Add(tmp[3]);
+		}
+
+		public static void WriteDouble(List<byte> buf, double v)
+		{
+			Span<byte> tmp = stackalloc byte[8];
+			BinaryPrimitives.WriteInt64LittleEndian(tmp, BitConverter.DoubleToInt64Bits(v));
+			for (int i = 0; i < 8; i++) buf.Add(tmp[i]);
+		}
+
+		public static void WriteBlob(List<byte> buf, byte[] data)
+		{
+			Write7BitEncodedInt(buf, data.Length);
+			buf.AddRange(data);
+		}
+
+		public delegate T ReadFunc<T>(ref ReadContext ctx);
+
+		public static T[] ReadArray<T>(ref ReadContext ctx, ReadFunc<T> readElement)
+		{
+			int count = ReadInt(ctx.buf, ref ctx.pos);
+			T[] arr = new T[count];
+			for (int i = 0; i < count; i++)
+				arr[i] = readElement(ref ctx);
+			return arr;
+		}
+
+		public static void WriteArray<T>(List<byte> buf, T[] arr, Action<T> writeElement)
+		{
+			WriteInt(buf, arr.Length);
+			for (int i = 0; i < arr.Length; i++)
+				writeElement(arr[i]);
+		}
+
+		// ── Token-based field serialization ──
+		// Format per field: [token:byte] [length:int32] [payload:bytes...]
+		// End of struct:    [0x00]
+
+		public const byte EndOfStruct = 0;
+
+		/// <summary>
+		/// Writes a length-prefixed field: token byte, int32 payload length, then payload.
+		/// </summary>
+		public static void WriteField(List<byte> buf, byte token, Action<List<byte>> writePayload)
+		{
+			buf.Add(token);
+			int lengthPos = buf.Count;
+			buf.Add(0); buf.Add(0); buf.Add(0); buf.Add(0); // placeholder length
+			int dataStart = buf.Count;
+			writePayload(buf);
+			int dataLen = buf.Count - dataStart;
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, dataLen);
+			buf[lengthPos] = tmp[0];
+			buf[lengthPos + 1] = tmp[1];
+			buf[lengthPos + 2] = tmp[2];
+			buf[lengthPos + 3] = tmp[3];
+		}
+
+		/// <summary>
+		/// Context-aware variant of <see cref="WriteField(List{byte},byte,Action{List{byte}})"/>
+		/// for payloads that need access to the string pool.
+		/// </summary>
+		public static void WriteField(WriteContext ctx, byte token, Action<WriteContext> writePayload)
+		{
+			List<byte> buf = ctx.body;
+			buf.Add(token);
+			int lengthPos = buf.Count;
+			buf.Add(0); buf.Add(0); buf.Add(0); buf.Add(0); // placeholder length
+			int dataStart = buf.Count;
+			writePayload(ctx);
+			int dataLen = buf.Count - dataStart;
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, dataLen);
+			buf[lengthPos] = tmp[0];
+			buf[lengthPos + 1] = tmp[1];
+			buf[lengthPos + 2] = tmp[2];
+			buf[lengthPos + 3] = tmp[3];
+		}
+
+		public static void WriteEndStruct(List<byte> buf) => buf.Add(EndOfStruct);
+
+		// ── WriteField convenience overloads (avoid lambda allocation for common types) ──
+
+		public static void WriteFieldString(List<byte> buf, byte token, string value)
+		{
+			WriteField(buf, token, b => WriteString(b, value));
+		}
+
+		public static void WriteFieldPooledString(WriteContext ctx, byte token, string value)
+		{
+			WriteField(ctx, token, c => WritePooledString(c, value));
+		}
+
+		/// <summary>
+		/// Emits a TLV field whose payload is a 7-bit-encoded index into the type pool.
+		/// Inlines the field header to avoid closure allocation per reference site.
+		/// </summary>
+		public static void WriteFieldPooledType(WriteContext ctx, byte token, SerializedTypeDescriptor td)
+		{
+			int idx = ctx.InternType(td);
+			List<byte> buf = ctx.body;
+			buf.Add(token);
+			int lengthPos = buf.Count;
+			buf.Add(0); buf.Add(0); buf.Add(0); buf.Add(0);
+			int dataStart = buf.Count;
+			Write7BitEncodedInt(buf, idx);
+			int dataLen = buf.Count - dataStart;
+			Span<byte> tmp = stackalloc byte[4];
+			BinaryPrimitives.WriteInt32LittleEndian(tmp, dataLen);
+			buf[lengthPos] = tmp[0];
+			buf[lengthPos + 1] = tmp[1];
+			buf[lengthPos + 2] = tmp[2];
+			buf[lengthPos + 3] = tmp[3];
+		}
+
+		public static void WriteFieldInt(List<byte> buf, byte token, int value)
+		{
+			WriteField(buf, token, b => WriteInt(b, value));
+		}
+
+		public static void WriteFieldBool(List<byte> buf, byte token, bool value)
+		{
+			WriteField(buf, token, b => WriteBool(b, value));
+		}
+
+		public static void WriteFieldByte(List<byte> buf, byte token, byte value)
+		{
+			WriteField(buf, token, b => WriteByte(b, value));
+		}
+
+		public static void WriteFieldLong(List<byte> buf, byte token, long value)
+		{
+			WriteField(buf, token, b => WriteLong(b, value));
+		}
+
+		public static void WriteFieldBlob(List<byte> buf, byte token, byte[] value)
+		{
+			WriteField(buf, token, b => WriteBlob(b, value));
+		}
+
+		/// <summary>
+		/// Writes fields via the callback, then automatically appends EndOfStruct.
+		/// </summary>
+		public static void WriteStruct(List<byte> buf, Action<List<byte>> writeFields)
+		{
+			writeFields(buf);
+			WriteEndStruct(buf);
+		}
+
+		/// <summary>
+		/// Context-aware variant of <see cref="WriteStruct(List{byte},Action{List{byte}})"/>.
+		/// </summary>
+		public static void WriteStruct(WriteContext ctx, Action<WriteContext> writeFields)
+		{
+			writeFields(ctx);
+			WriteEndStruct(ctx.body);
+		}
+
+		/// <summary>
+		/// Reads the next field token. Returns EndOfStruct (0) at struct boundary.
+		/// </summary>
+		public static byte ReadFieldToken(byte[] buf, ref int pos) => buf[pos++];
+
+		/// <summary>
+		/// Reads the int32 field payload length and returns the end position of the field.
+		/// The caller reads the payload, then sets pos = fieldEnd to ensure alignment.
+		/// </summary>
+		public static int ReadFieldLength(byte[] buf, ref int pos)
+		{
+			int len = ReadInt(buf, ref pos);
+			if (len < 0)
+				throw new CilboxException($"Corrupt field: negative length {len} at pos {pos}");
+			long fieldEnd = (long)pos + len; // guard the add itself against overflow
+			if (fieldEnd > buf.Length)
+				throw new CilboxException($"Corrupt field: length {len} at pos {pos} exceeds buffer ({buf.Length})");
+			return (int)fieldEnd;
+		}
+
+		/// <summary>
+		/// Skips an unknown field by reading its length prefix and advancing past the payload.
+		/// </summary>
+		public static void SkipField(byte[] buf, ref int pos)
+		{
+			int len = ReadInt(buf, ref pos);
+			pos += len;
+		}
+
+		public static byte[] CompressToBytesPooled(byte version, Action<WriteContext> writePayload)
+		{
+			WriteContext ctx = new WriteContext();
+			writePayload(ctx);
+
+			// Assemble: [stringPoolCount][stringPool entries...][typePoolCount][typePool entries...][body bytes]
+			// poolOrder[0] is the null sentinel; written as "" on the wire and
+			// restored to null on read. typeOrder[0] is the null sentinel; written
+			// as an all-zero entry on the wire and restored to null on read.
+			List<byte> uncompressed = new List<byte>(ctx.body.Count + 64);
+
+			// String pool
+			Write7BitEncodedInt(uncompressed, ctx.poolOrder.Count);
+			for (int i = 0; i < ctx.poolOrder.Count; i++)
+				WriteString(uncompressed, ctx.poolOrder[i] ?? "");
+
+			// Type pool — entries are emitted in topological order (children
+			// before parents), naturally produced by InternType's recursion.
+			Write7BitEncodedInt(uncompressed, ctx.typeOrder.Count);
+			for (int i = 0; i < ctx.typeOrder.Count; i++)
+			{
+				var e = ctx.typePoolEntries[i];
+				Write7BitEncodedInt(uncompressed, e.asmIdx);
+				Write7BitEncodedInt(uncompressed, e.typeIdx);
+				Write7BitEncodedInt(uncompressed, e.genIdx);
+				int argCount = e.argIdx?.Length ?? 0;
+				Write7BitEncodedInt(uncompressed, argCount);
+				for (int j = 0; j < argCount; j++)
+					Write7BitEncodedInt(uncompressed, e.argIdx[j]);
+				Write7BitEncodedInt(uncompressed, e.underIdx);
+			}
+
+			uncompressed.AddRange(ctx.body);
+			byte[] uncompressedArr = uncompressed.ToArray();
+
+			byte[] compressed;
+			using (var ms = new MemoryStream())
+			{
+				using (var deflate = new DeflateStream(ms, CompressionLevel.Optimal, leaveOpen: true))
+					deflate.Write(uncompressedArr, 0, uncompressedArr.Length);
+				compressed = ms.ToArray();
+			}
+
+			List<byte> buf = new List<byte>(1 + 4 + compressed.Length);
+			WriteByte(buf, version);
+			WriteInt(buf, uncompressedArr.Length);
+			buf.AddRange(compressed);
+			return buf.ToArray();
+		}
+
+		public static T DecompressAndReadPooled<T>(byte[] data, byte expectedVersion, string formatName,
+			ReadFunc<T> readPayload)
+		{
+			int pos = 0;
+			byte version = ReadByte(data, ref pos);
+			if (version != expectedVersion)
+				throw new CilboxException($"Unsupported {formatName} binary format version {version}, expected {expectedVersion}");
+
+			int uncompressedSize = ReadInt(data, ref pos);
+			byte[] uncompressed = new byte[uncompressedSize];
+			using (var ms = new MemoryStream(data, pos, data.Length - pos))
+			using (var deflate = new DeflateStream(ms, CompressionMode.Decompress))
+			{
+				int totalRead = 0;
+				while (totalRead < uncompressedSize)
+				{
+					int read = deflate.Read(uncompressed, totalRead, uncompressedSize - totalRead);
+					if (read == 0)
+						throw new CilboxException($"Deflate stream ended early: got {totalRead} bytes, expected {uncompressedSize}");
+					totalRead += read;
+				}
+			}
+
+			int payloadpos = 0;
+			int poolCount = Read7BitEncodedInt(uncompressed, ref payloadpos);
+			string[] pool = new string[poolCount];
+			for (int i = 0; i < poolCount; i++)
+				pool[i] = ReadString(uncompressed, ref payloadpos);
+			// Slot 0 is the null sentinel; written as "" on the wire.
+			pool[0] = null;
+
+			int typeCount = Read7BitEncodedInt(uncompressed, ref payloadpos);
+			SerializedTypeDescriptor[] types = new SerializedTypeDescriptor[typeCount];
+			// Each entry's children always have lower indices, so a single linear
+			// pass suffices. Slot 0 is read like the others (its all-zero indices
+			// dereference null strings) and then overridden to null afterward.
+			for (int i = 0; i < typeCount; i++)
+				types[i] = SerializedTypeDescriptor.ReadPoolEntry(uncompressed, ref payloadpos, pool, types);
+			types[0] = null;
+
+			ReadContext ctx = new ReadContext { buf = uncompressed, pos = payloadpos, strings = pool, types = types };
+			return readPayload(ref ctx);
 		}
 	}
 }
