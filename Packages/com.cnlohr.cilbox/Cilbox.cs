@@ -2276,6 +2276,9 @@ spiperf.End();
 
 		public long usSpentLastFrame = 0;
 
+		[NonSerialized] public List<CilboxProxy> proxies = new();
+		[NonSerialized] public bool DidBoot = false;
+
 		public Cilbox()
 		{
 			initialized = false;
@@ -2294,6 +2297,26 @@ spiperf.End();
 		public void ForceReinit()
 		{
 			initialized = false;
+		}
+
+		public void RegisterProxy(CilboxProxy proxy)
+		{
+			if (proxies.Contains(proxy))
+			{
+				return;
+			}
+			proxies.Add(proxy);
+			if (DidBoot)
+			{
+				proxy.RuntimeProxyLoad();
+				proxy.TryAwake();
+				proxy.TryOnEnable();
+			}
+		}
+
+		public void UnregisterProxy(CilboxProxy proxy)
+		{
+			proxies.Remove(proxy);
 		}
 
 		public void BoxInitialize( bool bSimulate = false )
@@ -2636,6 +2659,57 @@ spiperf.End();
 				}
 			}
 			Monitor.Exit( this );
+		}
+
+		public void Start()
+		{
+			CilboxProxy[] proxyArr = proxies.ToArray();
+			foreach (CilboxProxy cilboxProxy in proxyArr)
+			{
+				try
+				{
+					cilboxProxy.RuntimeProxyLoad();
+				}
+				catch (Exception e)
+				{
+					Debug.LogException(e);
+				}
+			}
+			foreach (CilboxProxy cilboxProxy in proxyArr)
+			{
+				try
+				{
+					cilboxProxy.TryAwake();
+				}
+				catch (Exception e)
+				{
+					Debug.LogException(e);
+				}
+			}
+			foreach (CilboxProxy cilboxProxy in proxyArr)
+			{
+				try
+				{
+					cilboxProxy.TryOnEnable();
+				}
+				catch (Exception e)
+				{
+					Debug.LogException(e);
+				}
+			}
+			foreach (CilboxProxy cilboxProxy in proxyArr)
+			{
+				try
+				{
+					cilboxProxy.TryStart();
+				}
+				catch (Exception e)
+				{
+					Debug.LogException(e);
+				}
+			}
+
+			DidBoot = true;
 		}
 
 		void Update()
