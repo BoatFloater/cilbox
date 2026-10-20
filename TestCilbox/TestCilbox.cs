@@ -454,6 +454,7 @@ namespace TestCilbox
 
 			try
 			{
+				cb.Start();
 				cycleRootProxy.RuntimeProxyLoad();
 				Cilbox.CilboxProxy cycleRootChildField = (Cilbox.CilboxProxy)GetProxyFieldObject(cycleRootProxy, "child");
 				Cilbox.CilboxProxy cycleChildRootField = (Cilbox.CilboxProxy)GetProxyFieldObject(cycleChildProxy, "root");
@@ -462,8 +463,6 @@ namespace TestCilbox
 				Validator.Set( "Cycle Root Has Child", (cycleRootChildField != null).ToString() );
 				Validator.Set( "Cycle Child Has Root", (cycleChildRootField != null).ToString() );
 				Validator.Set( "Cycle Child BackRef Same", (ReferenceEquals(cycleRootChildField, cycleChildProxy) && ReferenceEquals(cycleChildRootField, cycleRootProxy)).ToString() );
-				proxy.GetType().GetMethod("Awake",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
-				proxy.GetType().GetMethod("Start",BindingFlags.Instance|BindingFlags.NonPublic,Type.EmptyTypes).Invoke( proxy, new object[0] );
 				Validator.Validate( "Start Test", "OK" );
 				Validator.Validate( "Start Marks", "I" );
 				Validator.Validate( "Arithmatic Test", "15" );
@@ -967,10 +966,10 @@ namespace TestCilbox
 			Validator.Set( "Isolation Sibling Post", "skipped" );
 			try
 			{
-				InvokeProxyMethod( isoFaultProxy, "Start" );
+				isoFaultProxy.cls.InterpretMethod( isoFaultProxy, "StartTest", Array.Empty<object>() );
 				Validator.Set( "Isolation Fault Threw", "no" );
 			}
-			catch( TargetInvocationException )
+			catch( Exception )
 			{
 				Validator.Set( "Isolation Fault Threw", "yes" );
 			}

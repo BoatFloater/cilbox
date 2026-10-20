@@ -1401,7 +1401,7 @@ namespace TestCilbox
 	public class IsolationFaultBehaviour : MonoBehaviour
 	{
 		public int marker = 42;
-		public void Start()
+		public void StartTest()
 		{
 			Validator.Set("Isolation Fault Started", "yes");
 			throw new Exception("Injected interpreted fault");
