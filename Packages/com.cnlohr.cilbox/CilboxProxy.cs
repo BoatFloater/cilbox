@@ -28,6 +28,8 @@ namespace Cilbox
 
 		public bool disabled = false;
 
+		[NonSerialized] internal LinkedListNode<CilboxProxy> registryNode;
+
 		protected bool DidAwake = false;
 		protected bool DidStart = false;
 		protected bool DidEnable = false;
@@ -497,23 +499,23 @@ namespace Cilbox
 		}
 
 		public void TryAwake() { if (!proxyWasSetup || DidAwake || !gameObject.activeInHierarchy) return; DoAwake(); }
-		public void TryStart() { if (!proxyWasSetup || DidStart || !enabled || !gameObject.activeInHierarchy) return; DoStart(); }
-		public void TryOnEnable() { if (!proxyWasSetup || DidEnable || !enabled || !gameObject.activeInHierarchy) return; DoOnEnable(); }
+		public void TryOnEnable() { if (!proxyWasSetup || !DidAwake || DidEnable || !enabled || !gameObject.activeInHierarchy) return; DoOnEnable(); }
+		public void TryStart() { if (!proxyWasSetup || !DidAwake || DidStart || !enabled || !gameObject.activeInHierarchy) return; DoStart(); }
 
 		protected virtual void DoAwake()
 		{
-			cls.InterpretMethod(this, ImportFunctionID.Awake, null);
 			DidAwake = true;
+			cls.InterpretMethod(this, ImportFunctionID.Awake, null);
 		}
 		protected virtual void DoStart()
 		{
-			cls.InterpretMethod(this, ImportFunctionID.Start, null);
 			DidStart = true;
+			cls.InterpretMethod(this, ImportFunctionID.Start, null);
 		}
 		protected virtual void DoOnEnable()
 		{
-			cls.InterpretMethod(this, ImportFunctionID.OnEnable, null);
 			DidEnable = true;
+			cls.InterpretMethod(this, ImportFunctionID.OnEnable, null);
 		}
 
 		void Awake()
@@ -541,15 +543,21 @@ namespace Cilbox
 		}
 		void OnDisable()
 		{
-			if (!proxyWasSetup) return;
-			cls.InterpretMethod(this, ImportFunctionID.OnDisable, null);
+			if (!DidEnable) return;
 			DidEnable = false;
+			cls.InterpretMethod(this, ImportFunctionID.OnDisable, null);
 		}
 		void OnDestroy()
 		{
-			if (!proxyWasSetup) return;
-			cls.InterpretMethod(this, ImportFunctionID.OnDestroy, null);
-			box.UnregisterProxy(this);
+			try
+			{
+				if (DidAwake)
+					cls.InterpretMethod(this, ImportFunctionID.OnDestroy, null);
+			}
+			finally
+			{
+				if (box) box.UnregisterProxy(this);
+			}
 		}
 
 		void FixedUpdate() { if( proxyWasSetup ) cls.InterpretMethod(this, ImportFunctionID.FixedUpdate, null); }

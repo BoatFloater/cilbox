@@ -2276,8 +2276,10 @@ spiperf.End();
 
 		public long usSpentLastFrame = 0;
 
-		[NonSerialized] public List<CilboxProxy> proxies = new();
-		[NonSerialized] public bool DidBoot = false;
+		protected readonly LinkedList<CilboxProxy> proxies = new();
+
+		public int ProxyCount => proxies.Count;
+		public bool DidBoot { get; private set; }
 
 		public Cilbox()
 		{
@@ -2301,22 +2303,24 @@ spiperf.End();
 
 		public void RegisterProxy(CilboxProxy proxy)
 		{
-			if (proxies.Contains(proxy))
-			{
-				return;
-			}
-			proxies.Add(proxy);
+			if (proxy.registryNode == null)
+				proxy.registryNode = proxies.AddLast(proxy);
+
+			// Run Awake and OnEnable synchronously if the Cilbox has already booted;
+			// Start will run via the proxy's Start method.
 			if (DidBoot)
 			{
-				proxy.RuntimeProxyLoad();
-				proxy.TryAwake();
-				proxy.TryOnEnable();
+				proxyPhaseLoad(proxy);
+				proxyPhaseAwakeEnable(proxy);
 			}
 		}
 
 		public void UnregisterProxy(CilboxProxy proxy)
 		{
-			proxies.Remove(proxy);
+			LinkedListNode<CilboxProxy> node = proxy.registryNode;
+			if (node == null || node.List != proxies) return;
+			proxies.Remove(node);
+			proxy.registryNode = null;
 		}
 
 		public void BoxInitialize( bool bSimulate = false )
@@ -2657,55 +2661,43 @@ spiperf.End();
 			Monitor.Exit( this );
 		}
 
-		public void Start()
+		private static readonly Action<CilboxProxy> proxyPhaseLoad = p => p.RuntimeProxyLoad();
+		private static readonly Action<CilboxProxy> proxyPhaseAwakeEnable = p => { p.TryAwake(); p.TryOnEnable(); };
+		private static readonly Action<CilboxProxy> proxyPhaseStart = p => p.TryStart();
+
+		private static void RunLifecyclePhase( CilboxProxy[] snapshot, Action<CilboxProxy> phase )
 		{
-			CilboxProxy[] proxyArr = proxies.ToArray();
-			foreach (CilboxProxy cilboxProxy in proxyArr)
+			foreach( CilboxProxy proxy in snapshot )
 			{
+				if( !proxy ) continue;
 				try
 				{
-					cilboxProxy.RuntimeProxyLoad();
+					phase( proxy );
 				}
-				catch (Exception e)
+				catch( Exception e )
 				{
-					Debug.LogException(e);
+					Debug.LogException( e );
 				}
 			}
-			foreach (CilboxProxy cilboxProxy in proxyArr)
-			{
-				try
-				{
-					cilboxProxy.TryAwake();
-				}
-				catch (Exception e)
-				{
-					Debug.LogException(e);
-				}
-			}
-			foreach (CilboxProxy cilboxProxy in proxyArr)
-			{
-				try
-				{
-					cilboxProxy.TryOnEnable();
-				}
-				catch (Exception e)
-				{
-					Debug.LogException(e);
-				}
-			}
-			foreach (CilboxProxy cilboxProxy in proxyArr)
-			{
-				try
-				{
-					cilboxProxy.TryStart();
-				}
-				catch (Exception e)
-				{
-					Debug.LogException(e);
-				}
-			}
+		}
+
+		public void DoCilboxBoot()
+		{
+			if( DidBoot ) return;
 
 			DidBoot = true;
+
+			CilboxProxy[] snapshot = new CilboxProxy[proxies.Count];
+			proxies.CopyTo( snapshot, 0 );
+
+			RunLifecyclePhase( snapshot, proxyPhaseLoad );
+			RunLifecyclePhase( snapshot, proxyPhaseAwakeEnable );
+			RunLifecyclePhase( snapshot, proxyPhaseStart );
+		}
+
+		void Start()
+		{
+			DoCilboxBoot();
 		}
 
 		void Update()
