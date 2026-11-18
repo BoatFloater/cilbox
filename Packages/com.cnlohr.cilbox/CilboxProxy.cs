@@ -9,7 +9,7 @@ using Unity.Profiling;
 
 namespace Cilbox
 {
-	public class CilboxProxy : MonoBehaviour
+	public class CilboxProxy : MonoBehaviour, ISerializationCallbackReceiver
 	{
 		public StackElement [] fields;
 		public List< UnityEngine.Object > fieldsObjects;  // This is generally only held during saving and loading, not in use.
@@ -27,6 +27,25 @@ namespace Cilbox
 		private bool proxyLoadInProgress = false;
 
 		public bool disabled = false;
+
+		// When a loaded proxy is cloned through Object.Instantiate(), Unity serializes and
+		// deserializes it.  These fields carry the proxy's *current* CIL field values through
+		// that serialization pass.  The object table is a serialized List<UnityEngine.Object>
+		// so Unity's internal-reference remapping applies to it for free; the data string only
+		// contains indices into that table.  They are deliberately separate from the build-time
+		// template (serializedObjectData/fieldsObjects), which remains untouched.
+		[SerializeField, HideInInspector] private string runtimeSnapshotData;
+		[SerializeField, HideInInspector] private List< UnityEngine.Object > runtimeSnapshotObjects;
+		[SerializeField, HideInInspector] private string runtimeSnapshotSession;
+
+		// Schema (one entry per CIL instance field, null when the field was not serialized by
+		// SetupProxy) used to reproduce the build-time encoding decisions for snapshots.
+		[NonSerialized] private SerializedProxyField [] serializedFieldSchemas;
+
+		// Runtime snapshots are only valid for the process that created them.  This keeps a
+		// scene/prefab saved during an editor play session from being treated as a template
+		// when it is loaded again in a later session or in a build.
+		private static readonly string runtimeSessionId = Guid.NewGuid().ToString( "N" );
 
 		public void DisableProxy()
 		{
@@ -80,7 +99,7 @@ namespace Cilbox
 					continue;
 				}
 
-				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, ref refToProxyMap);
+				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, fieldsObjects, refToProxyMap);
 
 				// Serialize no matter what.
 				lstFields.Add( spf );
@@ -96,7 +115,7 @@ namespace Cilbox
 		}
 
 
-		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, ref Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
+		private static SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, List< UnityEngine.Object > objectSlots, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap = null, SerializedProxyField schema = null, HashSet< CilboxHeapInstance > heapStack = null )
 		{
 			SerializedProxyField spf = new SerializedProxyField();
 			spf.fieldName = fName;
@@ -124,22 +143,77 @@ namespace Cilbox
 					spf.primitiveValue.Unbox( underlying, st );
 				}
 			}
+			// Runtime-created cilbox objects (newobj) are plain managed objects.  Deep-copy
+			// their fields recursively.  Cycles are broken (they cannot be represented in this
+			// inline format) and aliasing is not preserved; both are runtime-only constructs
+			// with no direct Unity Instantiate analogue.
+			else if( fv is CilboxHeapInstance heap )
+			{
+				if( heapStack == null )
+					heapStack = new HashSet< CilboxHeapInstance >();
+				if( !heapStack.Add( heap ) )
+				{
+					spf.fieldType = (byte)ProxyFieldType.Unsupported;
+					return spf;
+				}
+
+				try
+				{
+					spf.fieldType = (byte)ProxyFieldType.CilboxHeap;
+					spf.data = heap.className;
+					int heapFieldCount = heap.fields != null ? heap.fields.Length : 0;
+					spf.arrayElements = new SerializedProxyField[heapFieldCount];
+					for( int i = 0; i < heapFieldCount; i++ )
+					{
+						StackElement he = heap.fields[i];
+						String hname = heap.cls != null && heap.cls.instanceFieldNames != null && i < heap.cls.instanceFieldNames.Length ? heap.cls.instanceFieldNames[i] : null;
+						if( he.type == StackType.Address || he.type == StackType.NativeHandle )
+						{
+							spf.arrayElements[i] = new SerializedProxyField { fieldType = (byte)ProxyFieldType.Unsupported, matchingInstanceId = i, fieldName = hname };
+							continue;
+						}
+						object hv = he.AsObject();
+						spf.arrayElements[i] = SerializeProxyField( hv, hname, i, objectSlots, null, BuildHeapFieldSchema( heap.cls, i ), heapStack );
+					}
+				}
+				finally
+				{
+					heapStack.Remove( heap );
+				}
+			}
+			// A runtime field value for a cilboxed class is already a CilboxProxy.  At build time
+			// the value is the original [Cilboxable] MonoBehaviour instead, which is handled below.
+			else if( fv is CilboxProxy cilboxProxy )
+			{
+				spf.fieldType = (byte)ProxyFieldType.CilboxRef;
+				spf.fieldObjectIndex = objectSlots.Count;
+				spf.objectRefName = fv.ToString();
+				spf.objectRefIsNull = spf.objectRefName == "null";
+				objectSlots.Add( cilboxProxy );
+			}
 			// Not a proxiable script.
 			else if (hasCilboxable)
 			{
 				spf.fieldType = (byte)ProxyFieldType.CilboxRef;
-				spf.fieldObjectIndex = fieldsObjects.Count;
+				spf.fieldObjectIndex = objectSlots.Count;
 				spf.objectRefName = fv.ToString();
 				spf.objectRefIsNull = spf.objectRefName == "null";
-				fieldsObjects.Add( refToProxyMap[(MonoBehaviour)fv] );
+
+				UnityEngine.Object mapped = null;
+				if( refToProxyMap != null && fv is MonoBehaviour mb && refToProxyMap.TryGetValue( mb, out CilboxProxy proxy ) )
+					mapped = proxy;
+				else if( fv is UnityEngine.Object uo )
+					mapped = uo;
+
+				objectSlots.Add( mapped );
 			}
 			else if( fv is UnityEngine.Object )
 			{
 				spf.fieldType = (byte)ProxyFieldType.ObjectRef;
-				spf.fieldObjectIndex = fieldsObjects.Count;
+				spf.fieldObjectIndex = objectSlots.Count;
 				spf.objectRefName = fv.ToString();
 				spf.objectRefIsNull = spf.objectRefName == "null";
-				fieldsObjects.Add( (UnityEngine.Object)fv );
+				objectSlots.Add( (UnityEngine.Object)fv );
 			}
 			else if( fv is string )
 			{
@@ -155,27 +229,159 @@ namespace Cilbox
 			{
 				spf.fieldType = (byte)ProxyFieldType.Array;
 				Type type = fvType.GetElementType();
-				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( type );
+				spf.elementType = schema != null && schema.fieldType == (byte)ProxyFieldType.Array && schema.elementType != null
+					? schema.elementType
+					: SerializedTypeDescriptorBuilder.FromNativeType( type );
 				Array arr = (Array)fv;
 				int len = arr.Length;
+				if( type == typeof( object ) || typeof( CilboxHeapInstance ).IsAssignableFrom( type ) )
+					spf.data = "o"; // preserve object[] on load for runtime-created cilbox arrays
+				SerializedProxyField[] schemaElements = schema != null ? schema.arrayElements : null;
 				spf.arrayElements = new SerializedProxyField[len];
 				for( int i = 0; i < len; i++ )
 				{
+					SerializedProxyField childSchema = schemaElements != null && i < schemaElements.Length ? schemaElements[i] : null;
 					object o = arr.GetValue(i);
-					spf.arrayElements[i] = SerializeProxyField( o, null, -1, ref refToProxyMap );
+					spf.arrayElements[i] = SerializeProxyField( o, null, -1, objectSlots, refToProxyMap, childSchema, heapStack );
 				}
 			}
 			else
 			{
 				spf.fieldType = (byte)ProxyFieldType.Json;
 				spf.data = JsonUtility.ToJson(fv);
-				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( fvType );
+				spf.elementType = schema != null && schema.fieldType != (byte)ProxyFieldType.Array && schema.elementType != null
+					? schema.elementType
+					: SerializedTypeDescriptorBuilder.FromNativeType( fvType );
 			}
 
 			return spf;
 		}
 
+		private static SerializedProxyField BuildHeapFieldSchema( CilboxClass hcls, int index )
+		{
+			if( hcls == null || hcls.instanceFieldTypeDescriptors == null ||
+				index < 0 || index >= hcls.instanceFieldTypeDescriptors.Length )
+				return null;
+
+			SerializedTypeDescriptor td = hcls.instanceFieldTypeDescriptors[index];
+			if( td == null )
+				return null;
+
+			SerializedProxyField schema = new SerializedProxyField();
+			schema.matchingInstanceId = index;
+			if( td.typeName != null && td.typeName.EndsWith( "[]" ) )
+			{
+				schema.fieldType = (byte)ProxyFieldType.Array;
+				schema.elementType = new SerializedTypeDescriptor
+				{
+					assemblyName = td.assemblyName,
+					typeName = td.typeName.Substring( 0, td.typeName.Length - 2 ),
+					genericName = td.genericName,
+					genericArgs = td.genericArgs,
+					underlyingType = td.underlyingType,
+				};
+			}
+			else
+			{
+				schema.elementType = td;
+			}
+			return schema;
+		}
+
 #endif
+
+		public void OnBeforeSerialize()
+		{
+			// Unloaded proxies keep their build-time payload untouched.
+			if( !proxyWasSetup || fields == null || proxyLoadInProgress )
+				return;
+
+			try
+			{
+				CaptureRuntimeSnapshot();
+			}
+			catch( Exception e )
+			{
+				// Never let a snapshot failure break Instantiate.  A clone will fall back to
+				// the build-time payload, if one is still available.
+				runtimeSnapshotData = null;
+				runtimeSnapshotObjects = null;
+				runtimeSnapshotSession = null;
+				Debug.LogWarning( $"[CilboxProxy:{className}] Failed to capture runtime snapshot: {e.Message}" );
+			}
+		}
+
+		public void OnAfterDeserialize()
+		{
+			// Intentionally empty.  RuntimeProxyLoad runs from Awake/Start, on the main thread,
+			// after Unity has assigned (and remapped) all serialized fields.  Doing load work here
+			// would be unsafe for scene deserialization and is skipped entirely by InstantiateAsync
+			// in some Unity versions.
+		}
+
+		// Serializes the live CIL field state into the same payload format SetupProxy uses, but
+		// only for fields that SetupProxy would have serialized.  Non-serialized/private fields
+		// must keep Unity's Instantiate semantics: the clone gets the constructor/default value.
+		private void CaptureRuntimeSnapshot()
+		{
+			if( serializedFieldSchemas == null )
+				return;
+
+			List< SerializedProxyField > lstFields = new List< SerializedProxyField >();
+			List< UnityEngine.Object > objectSlots = new List< UnityEngine.Object >();
+
+			for( int i = 0; i < serializedFieldSchemas.Length; i++ )
+			{
+				SerializedProxyField schema = serializedFieldSchemas[i];
+				if( schema == null )
+					continue;
+
+				object value;
+				String fieldName = cls != null && i < cls.instanceFieldNames.Length ? cls.instanceFieldNames[i] : null;
+				if( fields[i].type == StackType.Address || fields[i].type == StackType.NativeHandle )
+				{
+					// Runtime-only values cannot be transferred to another instance.  Leave the
+					// clone's default/constructor value in place rather than clobbering it.
+					lstFields.Add( new SerializedProxyField { fieldType = (byte)ProxyFieldType.Unsupported, matchingInstanceId = i, fieldName = fieldName } );
+					continue;
+				}
+				else
+				{
+					value = fields[i].AsObject( box );
+				}
+
+				lstFields.Add( SerializeProxyField( value, fieldName, i, objectSlots, null, schema ) );
+			}
+
+			SerializedProxy proxy = new SerializedProxy
+			{
+				fields = lstFields.ToArray(),
+			};
+
+			string newData = proxy.SerializeString();
+			bool same = newData == runtimeSnapshotData &&
+				runtimeSnapshotObjects != null &&
+				runtimeSnapshotObjects.Count == objectSlots.Count;
+			if( same )
+			{
+				for( int i = 0; i < objectSlots.Count; i++ )
+				{
+					if( !ReferenceEquals( runtimeSnapshotObjects[i], objectSlots[i] ) )
+					{
+						same = false;
+						break;
+					}
+				}
+			}
+
+			if( !same )
+			{
+				runtimeSnapshotData = newData;
+				runtimeSnapshotObjects = objectSlots;
+			}
+			runtimeSnapshotSession = runtimeSessionId;
+		}
+
 		void Awake()
 		{
 			// You cannot do anything in Awake()  Box is not set yet.
@@ -187,7 +393,22 @@ namespace Cilbox
 			if( proxyWasSetup ) return;
 			if( proxyLoadInProgress ) return;
 			if (box == null) return;
-			if (string.IsNullOrEmpty(serializedObjectData)) return;
+
+			// Prefer a snapshot captured by OnBeforeSerialize() for this object's clone.  A
+			// snapshot from another session (for example, a scene saved while in editor Play
+			// mode) is stale and must never be treated as a template.
+			bool fromSnapshot = !string.IsNullOrEmpty(runtimeSnapshotData) && runtimeSnapshotSession == runtimeSessionId;
+			if( !string.IsNullOrEmpty(runtimeSnapshotData) && !fromSnapshot )
+			{
+				runtimeSnapshotData = null;
+				runtimeSnapshotObjects = null;
+				runtimeSnapshotSession = null;
+			}
+
+			string sourceData = fromSnapshot ? runtimeSnapshotData : serializedObjectData;
+			List< UnityEngine.Object > sourceObjects = fromSnapshot ? runtimeSnapshotObjects : fieldsObjects;
+
+			if (string.IsNullOrEmpty(sourceData)) return;
 			proxyLoadInProgress = true;
 			try
 			{
@@ -214,7 +435,7 @@ namespace Cilbox
 
 				cls = box.GetClass( className );
 
-				runtimeFieldsObjects = fieldsObjects != null ? new List<UnityEngine.Object>(fieldsObjects) : new List<UnityEngine.Object>();
+				runtimeFieldsObjects = sourceObjects != null ? new List<UnityEngine.Object>(sourceObjects) : new List<UnityEngine.Object>();
 
 				// First thing: Go through any references that are prohibited.
 				for( int i = 0; i < runtimeFieldsObjects.Count; i++ )
@@ -257,17 +478,17 @@ namespace Cilbox
 				int fieldCount = cls.instanceFieldNames.Length;
 				fields = new StackElement[fieldCount];
 
-				SerializedProxy proxyData = SerializedProxy.DeserializeString( serializedObjectData );
+				SerializedProxy proxyData = SerializedProxy.DeserializeString( sourceData );
 
-				SerializedProxyField[] matchingProxyField = new SerializedProxyField[fieldCount];
+				serializedFieldSchemas = new SerializedProxyField[fieldCount];
 				foreach( SerializedProxyField spf in proxyData.fields )
 				{
-					// Go over the root objects, to see which ones slot in and how.
-					if( (ProxyFieldType)spf.fieldType != ProxyFieldType.Empty &&
-						spf.matchingInstanceId >= 0 &&
-						spf.matchingInstanceId < matchingProxyField.Length )
+					if( spf.matchingInstanceId >= 0 && spf.matchingInstanceId < fieldCount )
 					{
-						matchingProxyField[spf.matchingInstanceId] = spf;
+						// Keep Empty entries too: they mark a field that the build serializer
+						// considered serialized (it was null at build time), so later snapshots
+						// must include it.
+						serializedFieldSchemas[spf.matchingInstanceId] = spf;
 					}
 				}
 
@@ -326,11 +547,20 @@ namespace Cilbox
 				// load serialized fields.
 				for( int i = 0; i < fieldCount; i++ )
 				{
-					SerializedProxyField spf = matchingProxyField[i];
+					SerializedProxyField spf = serializedFieldSchemas[i];
 
 					if( spf == null ) { /* Debug.Log( $"Skipping {i} {cls.instanceFieldNames[i]}" ); */ continue; }
 
-					if( (ProxyFieldType)spf.fieldType == ProxyFieldType.Primitive )
+					ProxyFieldType ft = (ProxyFieldType)spf.fieldType;
+					if( ft == ProxyFieldType.Empty )
+					{
+						// Explicitly null in the payload.  Unity copies null over the clone's
+						// constructor/default value; do the same (notably for strings).
+						fields[i].LoadObject( null );
+						continue;
+					}
+
+					if( ft == ProxyFieldType.Primitive )
 					{
 						spf.primitiveValue.ToStackElement(ref fields[i]);
 						continue;
@@ -343,6 +573,14 @@ namespace Cilbox
 				proxyWasSetup = true;
 				runtimeFieldsObjects = null;
 				serializedObjectData = null;
+				if( fromSnapshot )
+				{
+					// This instance has already consumed its clone payload.  A future clone will
+					// capture a fresh snapshot from its own live fields.
+					runtimeSnapshotData = null;
+					runtimeSnapshotObjects = null;
+					runtimeSnapshotSession = null;
+				}
 				if (verboseLogging)
 					Debug.Log( $"RuntimeProxyLoad complete for class {className}" );
 			}
@@ -400,10 +638,50 @@ namespace Cilbox
 				break;
 			}
 
+			case ProxyFieldType.CilboxHeap:
+			{
+				CilboxClass hcls = box.GetClass( spf.data );
+				if( hcls == null )
+				{
+					Debug.LogWarning( $"[CilboxProxy:{gameObject.name}] Could not load cilbox heap class {spf.data} for field {rootFieldName}." );
+					refElement.LoadObject( null );
+					return;
+				}
+
+				CilboxHeapInstance heap = new CilboxHeapInstance
+				{
+					className = spf.data,
+					cls = hcls,
+					fields = new StackElement[ hcls.instanceFieldNames.Length ],
+				};
+				InitHeapFields( heap, hcls );
+
+				if( spf.arrayElements != null )
+				{
+					foreach( SerializedProxyField child in spf.arrayElements )
+					{
+						if( child == null ) continue;
+						int idx = child.matchingInstanceId;
+						if( idx < 0 || idx >= heap.fields.Length ) continue;
+						if( (ProxyFieldType)child.fieldType == ProxyFieldType.Unsupported ) continue;
+						if( (ProxyFieldType)child.fieldType == ProxyFieldType.Primitive )
+						{
+							child.primitiveValue.ToStackElement( ref heap.fields[idx] );
+							continue;
+						}
+						LoadProxyFieldStackElement( child, ref heap.fields[idx], rootFieldName + "." + hcls.instanceFieldNames[idx] );
+					}
+				}
+
+				refElement.LoadObject( heap );
+				return;
+			}
+
 			case ProxyFieldType.Array:
 			{
 				Type t = box.usage.GetNativeTypeFromDescriptor( spf.elementType );
 				bool isCilboxElementType = false;
+				bool forceObjectArray = spf.data == "o";
 
 				if (t == null)
 				{
@@ -417,6 +695,25 @@ namespace Cilbox
 					{
 						refElement.LoadObject(null);
 						return;
+					}
+				}
+
+				if( forceObjectArray )
+				{
+					// Arrays created by newarr for cilbox classes are object[], and runtime-created
+					// CilboxHeapInstance elements cannot go into CilboxProxy[].
+					t = typeof(object);
+					isCilboxElementType = true; // skip the type whitelist check, as for CilboxProxy arrays
+				}
+				else if( isCilboxElementType && spf.arrayElements != null )
+				{
+					foreach( SerializedProxyField child in spf.arrayElements )
+					{
+						if( child != null && (ProxyFieldType)child.fieldType == ProxyFieldType.CilboxHeap )
+						{
+							t = typeof(object);
+							break;
+						}
 					}
 				}
 
@@ -456,8 +753,14 @@ namespace Cilbox
 				{
 					for( int j = 0; j < aLen; j++ )
 					{
+						SerializedProxyField child = spf.arrayElements[j];
+						if( (ProxyFieldType)child.fieldType == ProxyFieldType.Unsupported )
+						{
+							arr.SetValue( t.IsValueType ? Activator.CreateInstance( t ) : null, j );
+							continue;
+						}
 						StackElement temp = default;
-						LoadProxyFieldStackElement( spf.arrayElements[j], ref temp, rootFieldName );
+						LoadProxyFieldStackElement( child, ref temp, rootFieldName );
 						arr.SetValue( temp.AsObject(), j );
 					}
 				}
@@ -485,12 +788,54 @@ namespace Cilbox
 				return;
 			}
 
+			case ProxyFieldType.Unsupported:
+				// Runtime-only value; the preinitialized default/constructor value is correct.
+				return;
+
 			case ProxyFieldType.Empty:
 			default:
 				break;
 			}
 
 			refElement.LoadObject(null);
+		}
+
+		private static void InitHeapFields( CilboxHeapInstance heap, CilboxClass hcls )
+		{
+			for( int i = 0; i < heap.fields.Length; i++ )
+			{
+				Type fieldType = hcls.instanceFieldTypes[i];
+				if( fieldType == null )
+				{
+					heap.fields[i].LoadObject( null );
+					continue;
+				}
+
+				StackType st = StackElement.StackTypeFromType( fieldType );
+				if( st < StackType.Object )
+				{
+					heap.fields[i].type = st;
+				}
+				else if( fieldType.IsValueType )
+				{
+					try
+					{
+						heap.fields[i].LoadObject( Activator.CreateInstance( fieldType ) );
+					}
+					catch
+					{
+						heap.fields[i].LoadObject( null );
+					}
+				}
+				else if( fieldType == typeof( string ) )
+				{
+					heap.fields[i].LoadObject( string.Empty );
+				}
+				else
+				{
+					heap.fields[i].LoadObject( null );
+				}
+			}
 		}
 
 

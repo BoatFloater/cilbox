@@ -2050,6 +2050,9 @@ spiperf.End();
 
 		public String[] instanceFieldNames;
 		public Type[] instanceFieldTypes;
+		// Declared type descriptors (needed at runtime to reproduce build-time encoding for
+		// values that have no native Type, e.g. arrays of cilbox classes).
+		public SerializedTypeDescriptor[] instanceFieldTypeDescriptors;
 
 		public Dictionary< String, uint > methodNameToIndex;
 		public Dictionary< String, uint > methodFullSignatureToIndex;
@@ -2090,9 +2093,11 @@ spiperf.End();
 			int ifnum = sc.instanceFields.Length;
 			instanceFieldNames = new String[ifnum];
 			instanceFieldTypes = new Type[ifnum];
+			instanceFieldTypeDescriptors = new SerializedTypeDescriptor[ifnum];
 			for( int k = 0; k < ifnum; k++ )
 			{
 				instanceFieldNames[k] = sc.instanceFields[k].name;
+				instanceFieldTypeDescriptors[k] = sc.instanceFields[k].type;
 				instanceFieldTypes[k] = box.usage.GetNativeTypeFromDescriptor( sc.instanceFields[k].type );
 			}
 

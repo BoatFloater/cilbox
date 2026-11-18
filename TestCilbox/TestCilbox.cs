@@ -377,6 +377,7 @@ namespace TestCilbox
 			};
 
 			ValidateNegativeFieldsObjectIndex();
+			ValidateUnloadedSnapshotNoOp();
 
 			GameObject go = new GameObject("MyObjectToProxy");
 			TestCilboxBehaviour b = go.CreateComponent<TestCilboxBehaviour>();
@@ -999,7 +1000,113 @@ namespace TestCilbox
 			Validator.Set("CustomMethodByName Result", $"{(int)res}");
 			Validator.Validate("CustomMethodByName Result", "5");
 
+			ValidateRuntimeSnapshotRoundTrip(proxy);
+
 			return -1 * Validator.NumValidationErrors();
+		}
+
+		private static void ValidateUnloadedSnapshotNoOp()
+		{
+			Cilbox.CilboxProxy proxy = new Cilbox.CilboxProxy();
+			proxy.OnBeforeSerialize();
+			FieldInfo dataField = typeof(Cilbox.CilboxProxy).GetField("runtimeSnapshotData", BindingFlags.Instance | BindingFlags.NonPublic);
+			Validator.Set("Snapshot Unloaded NoOp", (dataField.GetValue(proxy) == null).ToString());
+			Validator.Validate("Snapshot Unloaded NoOp", "True");
+		}
+
+		private static bool SnapshotValueEquals( object a, object b )
+		{
+			if( ReferenceEquals( a, b ) ) return true;
+			if( a == null || b == null ) return false;
+
+			if( a is Array aa && b is Array ba )
+			{
+				if( aa.Length != ba.Length ) return false;
+				for( int i = 0; i < aa.Length; i++ )
+					if( !SnapshotValueEquals( aa.GetValue( i ), ba.GetValue( i ) ) ) return false;
+				return true;
+			}
+
+			if( a is Cilbox.CilboxHeapInstance ha && b is Cilbox.CilboxHeapInstance hb )
+			{
+				if( ha.className != hb.className ) return false;
+				if( ha.fields == null || hb.fields == null ) return ha.fields == hb.fields;
+				if( ha.fields.Length != hb.fields.Length ) return false;
+				for( int i = 0; i < ha.fields.Length; i++ )
+					if( !SnapshotValueEquals( ha.fields[i].AsObject(), hb.fields[i].AsObject() ) ) return false;
+				return true;
+			}
+
+			return a.Equals( b );
+		}
+
+		private static void ValidateRuntimeSnapshotRoundTrip( Cilbox.CilboxProxy source )
+		{
+			const BindingFlags BF = BindingFlags.Instance | BindingFlags.NonPublic;
+			Type proxyType = typeof(Cilbox.CilboxProxy);
+			FieldInfo dataField = proxyType.GetField("runtimeSnapshotData", BF);
+			FieldInfo objectsField = proxyType.GetField("runtimeSnapshotObjects", BF);
+			FieldInfo sessionField = proxyType.GetField("runtimeSnapshotSession", BF);
+			FieldInfo schemasField = proxyType.GetField("serializedFieldSchemas", BF);
+
+			int nullStringIndex = Array.IndexOf(source.cls.instanceFieldNames, "emptyStringField");
+			if( nullStringIndex >= 0 )
+				source.fields[nullStringIndex].LoadObject(null);
+
+			source.OnBeforeSerialize();
+			string data = (string)dataField.GetValue(source);
+			List<UnityEngine.Object> objects = (List<UnityEngine.Object>)objectsField.GetValue(source);
+			string session = (string)sessionField.GetValue(source);
+			Validator.Set("Snapshot Captured", (!string.IsNullOrEmpty(data)).ToString());
+			Validator.Validate("Snapshot Captured", "True");
+
+			GameObject cloneGo = new GameObject("SnapshotCloneToProxy");
+			Cilbox.CilboxProxy clone = cloneGo.AddComponent<Cilbox.CilboxProxy>();
+			clone.box = source.box;
+			clone.className = source.className;
+			dataField.SetValue(clone, data);
+			objectsField.SetValue(clone, objects != null ? new List<UnityEngine.Object>(objects) : new List<UnityEngine.Object>());
+			sessionField.SetValue(clone, session);
+
+			clone.RuntimeProxyLoad();
+			Validator.Set("Snapshot Clone Loaded", (clone.fields != null).ToString());
+			Validator.Validate("Snapshot Clone Loaded", "True");
+
+			SerializedProxyField[] schemas = (SerializedProxyField[])schemasField.GetValue(source);
+			int privateFieldIndex = Array.IndexOf(source.cls.instanceFieldNames, "ipriviateinance");
+			Validator.Set("Snapshot Excludes NonSerialized", (privateFieldIndex >= 0 && schemas[privateFieldIndex] == null).ToString());
+			Validator.Validate("Snapshot Excludes NonSerialized", "True");
+
+			int heapArrayIndex = Array.IndexOf(source.cls.instanceFieldNames, "myBehaviour3Arr");
+			object heapArray = heapArrayIndex >= 0 ? clone.fields[heapArrayIndex].AsObject() : null;
+			Validator.Set("Snapshot Heap Array Loaded",
+				(heapArray is Array ha && ha.Length == 2 && ha.GetValue(0) is Cilbox.CilboxHeapInstance).ToString());
+			Validator.Validate("Snapshot Heap Array Loaded", "True");
+
+			if( nullStringIndex >= 0 )
+			{
+				Validator.Set("Snapshot Null String", (clone.fields[nullStringIndex].AsObject() == null).ToString());
+				Validator.Validate("Snapshot Null String", "True");
+			}
+
+			int mismatches = 0;
+			for( int i = 0; i < schemas.Length; i++ )
+			{
+				SerializedProxyField schema = schemas[i];
+				if( schema == null ) continue;
+				// The mock JsonUtility cannot round-trip JSON values.
+				if( (ProxyFieldType)schema.fieldType == ProxyFieldType.Json ) continue;
+
+				object a = source.fields[i].AsObject(source.box);
+				object b = clone.fields[i].AsObject(clone.box);
+				if( !SnapshotValueEquals(a, b) )
+				{
+					mismatches++;
+					Debug.Log($"Snapshot mismatch field {i} {source.cls.instanceFieldNames[i]}: {a} != {b}");
+				}
+			}
+			Validator.Set("Snapshot Field Mismatches", mismatches.ToString());
+			Validator.Validate("Snapshot Field Mismatches", "0");
 		}
 
 		private static void ValidateNegativeFieldsObjectIndex()

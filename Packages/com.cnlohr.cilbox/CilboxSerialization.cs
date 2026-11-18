@@ -653,6 +653,8 @@ namespace Cilbox
 		ObjectRef   = 4,  // "obj" — UnityEngine.Object reference
 		Array       = 5,  // "a"
 		Json        = 6,  // "j" — JsonUtility-serialized struct
+		CilboxHeap  = 7,  // "h" — deep copy of a runtime CilboxHeapInstance
+		Unsupported = 8,  // "u" — runtime-only value; leave the clone's default in place
 	}
 
 	// Primitive-only value payload. 16 bytes (no object slot). NOTE: keep the
@@ -767,6 +769,12 @@ namespace Cilbox
 
 			if( (ProxyFieldType)fieldType == ProxyFieldType.Empty )
 			{
+				// Null root fields are still part of the serialized-field set.  Preserve their
+				// identity so runtime snapshots can include them if they become non-null later.
+				if( fieldName != null )
+					f["n"] = new Serializee( fieldName );
+				if( matchingInstanceId >= 0 )
+					f["miid"] = new Serializee( matchingInstanceId.ToString() );
 				f["empty"] = new Serializee( "true" );
 				return new Serializee( f );
 			}
@@ -799,6 +807,8 @@ namespace Cilbox
 				case ProxyFieldType.Array:
 					f["t"] = new Serializee( "a" );
 					f["at"] = elementType.ToSerializee();
+					if( data != null )
+						f["d"] = new Serializee( data );
 					f["al"] = new Serializee( arrayElements.Length.ToString() );
 					Serializee[] ad = new Serializee[arrayElements.Length];
 					for( int i = 0; i < arrayElements.Length; i++ )
@@ -810,6 +820,18 @@ namespace Cilbox
 					f["d"] = new Serializee( data );
 					f["at"] = elementType.ToSerializee();
 					break;
+				case ProxyFieldType.CilboxHeap:
+					f["t"] = new Serializee( "h" );
+					f["d"] = new Serializee( data );
+					f["al"] = new Serializee( arrayElements.Length.ToString() );
+					Serializee[] hd = new Serializee[arrayElements.Length];
+					for( int i = 0; i < arrayElements.Length; i++ )
+						hd[i] = arrayElements[i].ToSerializee();
+					f["ad"] = new Serializee( hd );
+					break;
+				case ProxyFieldType.Unsupported:
+					f["t"] = new Serializee( "u" );
+					break;
 			}
 			return new Serializee( f );
 		}
@@ -820,16 +842,16 @@ namespace Cilbox
 			SerializedProxyField f = new SerializedProxyField();
 			f.matchingInstanceId = -1;
 
+			if( m.TryGetValue( "n", out Serializee nS ) )
+				f.fieldName = nS.AsString();
+			if( m.TryGetValue( "miid", out Serializee miidS ) )
+				f.matchingInstanceId = Int32.Parse( miidS.AsString() );
+
 			if( m.ContainsKey( "empty" ) )
 			{
 				f.fieldType = (byte)ProxyFieldType.Empty;
 				return f;
 			}
-
-			if( m.TryGetValue( "n", out Serializee nS ) )
-				f.fieldName = nS.AsString();
-			if( m.TryGetValue( "miid", out Serializee miidS ) )
-				f.matchingInstanceId = Int32.Parse( miidS.AsString() );
 
 			String t = m["t"].AsString();
 			if( t == "s" )
@@ -855,6 +877,8 @@ namespace Cilbox
 			{
 				f.fieldType = (byte)ProxyFieldType.Array;
 				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
+				if( m.TryGetValue( "d", out Serializee adS ) )
+					f.data = adS.AsString();
 				Serializee[] ad = m["ad"].AsArray();
 				f.arrayElements = new SerializedProxyField[ad.Length];
 				for( int i = 0; i < ad.Length; i++ )
@@ -865,6 +889,19 @@ namespace Cilbox
 				f.fieldType = (byte)ProxyFieldType.Json;
 				f.data = m["d"].AsString();
 				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
+			}
+			else if( t == "h" )
+			{
+				f.fieldType = (byte)ProxyFieldType.CilboxHeap;
+				f.data = m["d"].AsString();
+				Serializee[] hd = m["ad"].AsArray();
+				f.arrayElements = new SerializedProxyField[hd.Length];
+				for( int i = 0; i < hd.Length; i++ )
+					f.arrayElements[i] = FromSerializee( hd[i] );
+			}
+			else if( t == "u" )
+			{
+				f.fieldType = (byte)ProxyFieldType.Unsupported;
 			}
 			else if( t.Length > 0 && t[0] == 'e' )
 			{
