@@ -975,7 +975,7 @@ namespace Cilbox
 				BinaryHelper.WriteFieldByte(c.body, T_MetaTokenType, metaTokenType);
 				MetaTokenType mt = (MetaTokenType)metaTokenType;
 
-				switch (mt)
+				switch( mt )
 				{
 					case MetaTokenType.mtString:
 						// Raw path: IL string literals don't dedup well and can be large.
@@ -988,7 +988,7 @@ namespace Cilbox
 						BinaryHelper.WriteFieldPooledType(c, T_FieldDeclaringType, fieldDeclaringType);
 						BinaryHelper.WriteFieldPooledString(c, T_FieldName, fieldName);
 						BinaryHelper.WriteFieldBool(c.body, T_FieldIsStatic, fieldIsStatic);
-						if (fieldHasIndex)
+						if( fieldHasIndex )
 							BinaryHelper.WriteFieldInt(c.body, T_FieldIndex, fieldIndex);
 						break;
 					case MetaTokenType.mtType:
@@ -1011,7 +1011,7 @@ namespace Cilbox
 						{
 							var ga = methodGenericArguments ?? Array.Empty<SerializedTypeDescriptor>();
 							BinaryHelper.WriteInt(c2.body, ga.Length);
-							for (int i = 0; i < ga.Length; i++)
+							for( int i = 0; i < ga.Length; i++ )
 								BinaryHelper.WritePooledType(c2, ga[i]);
 						});
 						break;
@@ -1240,6 +1240,13 @@ namespace Cilbox
 				case StackType.Float:   this.l = 0; this.f = (float)i;  break;
 				case StackType.Double:  this.d = (double)i;     break;
 			}
+		}
+
+		public void ToStackElement(ref StackElement se)
+		{
+			se.type = type;
+			se.l = l; // copy full 8 bytes
+			se.o = null; // clear if previously set
 		}
 	}
 

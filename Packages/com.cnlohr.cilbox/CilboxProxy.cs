@@ -105,10 +105,10 @@ namespace Cilbox
 				return spf;
 			}
 
-			bool hasCilboxable = CilboxUtil.HasCilboxableAttribute( fv.GetType() );
+			Type fvType = fv.GetType();
+			bool hasCilboxable = CilboxUtil.HasCilboxableAttribute( fvType );
 
 			StackType st;
-			Type fvType = fv.GetType();
 
 			// Serialize enum field as underlying type
 			if( fvType.IsEnum )
@@ -324,24 +324,13 @@ namespace Cilbox
 
 					if( spf == null ) { /* Debug.Log( $"Skipping {i} {cls.instanceFieldNames[i]}" ); */ continue; }
 
-					// Primitive: expand the 16-byte PrimitivePayload into the 24-byte StackElement.
-					// `l` overlaps b/f/d/e in both structs, so a single 8-byte copy at offset 8
-					// captures the entire union. No boxing, no allocation.
 					if( (ProxyFieldType)spf.fieldType == ProxyFieldType.Primitive )
 					{
-						ref StackElement dst = ref fields[i];
-						dst.type = spf.primitiveValue.type;
-						dst.l    = spf.primitiveValue.l;   // entire 8-byte union
-						dst.o    = null;                   // clear any prior ref
+						spf.primitiveValue.ToStackElement(ref fields[i]);
 						continue;
 					}
 
-					object o;
-					bool bIsObject = LoadObjectFromProxyField( spf, out o, cls.instanceFieldNames[i], cls.instanceFieldTypes[i] );
-					if( bIsObject )
-						fields[i].LoadObject( o );
-					else
-						fields[i].Load( o );
+					LoadProxyFieldStackElement( spf, ref fields[i], cls.instanceFieldNames[i] );
 				}
 
 
@@ -361,17 +350,6 @@ namespace Cilbox
 		// Loads the reference StackElement with the appropriate data
 		private void LoadProxyFieldStackElement( SerializedProxyField spf, ref StackElement refElement, String rootFieldName )
 		{
-			object o;
-			bool bIsObject = LoadObjectFromProxyField( spf, out o, rootFieldName, null );
-			if( bIsObject )
-				refElement.LoadObject( o );
-			else
-				refElement.Load( o );
-		}
-
-		// Returns: true if is object, otherwise is primitive.
-		private bool LoadObjectFromProxyField( SerializedProxyField spf, out object oOut, String rootFieldName, Type inType )
-		{
 			ProxyFieldType ft = (ProxyFieldType)spf.fieldType;
 			List<UnityEngine.Object> objectSlots = runtimeFieldsObjects ?? fieldsObjects;
 
@@ -381,35 +359,38 @@ namespace Cilbox
 			case ProxyFieldType.ObjectRef:
 			{
 				int iFO = spf.fieldObjectIndex;
-				if( iFO >= 0 && iFO < objectSlots.Count )
+				if (iFO < 0 || iFO >= objectSlots.Count) // break early if index is out of bounds
 				{
-					if( spf.objectRefIsNull )
-					{
-						// This field was null when serialized, so just return null
-						oOut = null;
-						return true;
-					}
-
-					UnityEngine.Object o = objectSlots[iFO];
-
-					if( o )
-					{
-						if( o is CilboxProxy )
-							((CilboxProxy)o).RuntimeProxyLoad();
-
-						oOut = o;
-
-						// Remove reference out of the fieldsObjects array.
-						objectSlots[iFO] = null;
-
-						return true;
-					}
-					Debug.LogWarning( $"[CilboxProxy:{gameObject.name}] Object reference slot {iFO} for field {rootFieldName} is null/missing at load time." );
+					Debug.LogWarning(
+						$"Failure to load object in field id:{rootFieldName} of {className} (slot out of range, fieldsObjects count={objectSlots.Count})");
+					break;
 				}
-				else
+
+				if (spf.objectRefIsNull)
 				{
-					Debug.LogWarning( $"Failure to load object in field id:{rootFieldName} of {className} (slot out of range, fieldsObjects count={objectSlots.Count})");
+					// This field was null when serialized, so just load null
+					refElement.LoadObject(null);
+					return;
 				}
+
+				UnityEngine.Object o = objectSlots[iFO];
+
+				if (o)
+				{
+					if (o is CilboxProxy cilboxProxy)
+						cilboxProxy.RuntimeProxyLoad();
+
+					refElement.LoadObject(o);
+
+					// Remove reference out of the fieldsObjects array.
+					objectSlots[iFO] = null;
+
+					return;
+				}
+
+				Debug.LogWarning(
+					$"[CilboxProxy:{gameObject.name}] Object reference slot {iFO} for field {rootFieldName} is null/missing at load time.");
+
 				break;
 			}
 
@@ -420,17 +401,16 @@ namespace Cilbox
 
 				if (t == null)
 				{
-					String elementTypeName = spf.elementType.typeName;
-					if (box.classes.ContainsKey(elementTypeName))
+					if (box.classes.ContainsKey(spf.elementType.typeName))
 					{
 						// Check the array to see if it is Cilboxed
 						t = typeof(CilboxProxy);
 						isCilboxElementType = true;
 					}
-					else
+					else // type is null and not a Cilbox class
 					{
-						oOut = null;
-						return true;
+						refElement.LoadObject(null);
+						return;
 					}
 				}
 
@@ -453,77 +433,59 @@ namespace Cilbox
 					// Typed array fill — one cast outside the loop, direct typed writes inside. Zero boxes.
 					switch( elementSt )
 					{
-					case StackType.Boolean: { var a = (bool   [])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.b;       break; }
-					case StackType.Sbyte:   { var a = (sbyte  [])arr; for (int j = 0; j < aLen; j++) a[j] = (sbyte )spf.arrayElements[j].primitiveValue.l;       break; }
-					case StackType.Byte:    { var a = (byte   [])arr; for (int j = 0; j < aLen; j++) a[j] = (byte  )spf.arrayElements[j].primitiveValue.e;       break; }
-					case StackType.Short:   { var a = (short  [])arr; for (int j = 0; j < aLen; j++) a[j] = (short )spf.arrayElements[j].primitiveValue.l;       break; }
-					case StackType.Ushort:  { var a = (ushort [])arr; for (int j = 0; j < aLen; j++) a[j] = (ushort)spf.arrayElements[j].primitiveValue.e;       break; }
-					case StackType.Int:     { var a = (int    [])arr; for (int j = 0; j < aLen; j++) a[j] = (int   )spf.arrayElements[j].primitiveValue.l;       break; }
-					case StackType.Uint:    { var a = (uint   [])arr; for (int j = 0; j < aLen; j++) a[j] = (uint  )spf.arrayElements[j].primitiveValue.e;       break; }
-					case StackType.Long:    { var a = (long   [])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.l;       break; }
-					case StackType.Ulong:   { var a = (ulong  [])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.e;       break; }
-					case StackType.Float:   { var a = (float  [])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.f;       break; }
-					case StackType.Double:  { var a = (double [])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.d;       break; }
+					case StackType.Boolean: { var a = (bool[])  arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.b; break; }
+					case StackType.Sbyte:   { var a = (sbyte[]) arr; for (int j = 0; j < aLen; j++) a[j] = (sbyte) spf.arrayElements[j].primitiveValue.l; break; }
+					case StackType.Byte:    { var a = (byte[])  arr; for (int j = 0; j < aLen; j++) a[j] = (byte)  spf.arrayElements[j].primitiveValue.e; break; }
+					case StackType.Short:   { var a = (short[]) arr; for (int j = 0; j < aLen; j++) a[j] = (short) spf.arrayElements[j].primitiveValue.l; break; }
+					case StackType.Ushort:  { var a = (ushort[])arr; for (int j = 0; j < aLen; j++) a[j] = (ushort)spf.arrayElements[j].primitiveValue.e; break; }
+					case StackType.Int:     { var a = (int[])   arr; for (int j = 0; j < aLen; j++) a[j] = (int)   spf.arrayElements[j].primitiveValue.l; break; }
+					case StackType.Uint:    { var a = (uint[])  arr; for (int j = 0; j < aLen; j++) a[j] = (uint)  spf.arrayElements[j].primitiveValue.e; break; }
+					case StackType.Long:    { var a = (long[])  arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.l; break; }
+					case StackType.Ulong:   { var a = (ulong[]) arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.e; break; }
+					case StackType.Float:   { var a = (float[]) arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.f; break; }
+					case StackType.Double:  { var a = (double[])arr; for (int j = 0; j < aLen; j++) a[j] =         spf.arrayElements[j].primitiveValue.d; break; }
 					}
 				}
-				else
+				else // non-primitive array
 				{
 					for( int j = 0; j < aLen; j++ )
 					{
-						object o;
-						LoadObjectFromProxyField( spf.arrayElements[j], out o, rootFieldName, t );
-						arr.SetValue( o, j );
+						StackElement temp = default;
+						LoadProxyFieldStackElement( spf.arrayElements[j], ref temp, rootFieldName );
+						arr.SetValue( temp.AsObject(), j );
 					}
 				}
 
-				oOut = arr;
-				return true;
+				refElement.LoadObject(arr);
+				return;
 			}
 
 			case ProxyFieldType.String:
 			{
-				oOut = spf.data;
-				return false;
+				refElement.LoadObject(spf.data);
+				return;
 			}
 
 			case ProxyFieldType.Primitive:
 			{
-				// Slow path — only reached if a caller didn't short-circuit. Re-boxes from the
-				// 16-byte PrimitivePayload (no object slot, so the StackElement.AsObject branches
-				// for Address/NativeHandle/Object don't apply here).
-				oOut = spf.primitiveValue.type switch
-				{
-					StackType.Boolean => spf.primitiveValue.b,
-					StackType.Sbyte => (sbyte)spf.primitiveValue.l,
-					StackType.Byte => (byte)spf.primitiveValue.e,
-					StackType.Short => (short)spf.primitiveValue.l,
-					StackType.Ushort => (ushort)spf.primitiveValue.e,
-					StackType.Int => (int)spf.primitiveValue.l,
-					StackType.Uint => (uint)spf.primitiveValue.e,
-					StackType.Long => spf.primitiveValue.l,
-					StackType.Ulong => spf.primitiveValue.e,
-					StackType.Float => spf.primitiveValue.f,
-					StackType.Double => spf.primitiveValue.d,
-					_ => throw new NotSupportedException($"PrimitivePayload cannot box StackType {spf.primitiveValue.type}")
-				};
-				return false;
+				spf.primitiveValue.ToStackElement(ref refElement);
+				return;
 			}
 
 			case ProxyFieldType.Json:
 			{
 				Type t = box.usage.GetNativeTypeFromDescriptor( spf.elementType );
-				oOut = JsonUtility.FromJson(spf.data, t);
-				return true;
+				refElement.LoadObject(JsonUtility.FromJson(spf.data, t));
+				return;
 			}
 
+			case ProxyFieldType.Empty:
 			default:
 				break;
 			}
 
-			oOut = null;
-			return false;
+			refElement.LoadObject(null);
 		}
-
 
 		void Start() {
 			RuntimeProxyLoad();

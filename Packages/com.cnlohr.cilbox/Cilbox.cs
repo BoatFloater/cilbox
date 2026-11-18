@@ -101,11 +101,11 @@ namespace Cilbox
 				typeParameters[p] = parentClass.box.usage.GetNativeTypeFromDescriptor( sm.parameters[p].type );
 			}
 
-			if( sm.exceptionHandlers.Length > 0 )
+			if (sm.exceptionHandlers.Length > 0)
 			{
 				exceptionClauses = new CilboxExceptionHandlingClause[sm.exceptionHandlers.Length];
 				handlerOffsetToClauseMap = new Dictionary<int, CilboxExceptionHandlingClause>();
-				for( int e = 0; e < sm.exceptionHandlers.Length; e++ )
+				for (int e = 0; e < sm.exceptionHandlers.Length; e++)
 				{
 					SerializedExceptionHandler seh = sm.exceptionHandlers[e];
 					CilboxExceptionHandlingClause clause = new CilboxExceptionHandlingClause();
@@ -116,9 +116,9 @@ namespace Cilbox
 					clause.HandlerOffset = seh.handlerOffset;
 					clause.HandlerLength = seh.handlerLength;
 					clause.HandlerEndOffset = clause.HandlerOffset + clause.HandlerLength;
-					if( seh.hasCatchType )
+					if (seh.hasCatchType)
 					{
-						clause.CatchType = parentClass.box.usage.GetNativeTypeFromDescriptor( seh.catchType );
+						clause.CatchType = parentClass.box.usage.GetNativeTypeFromDescriptor(seh.catchType);
 						if (clause.CatchType == null)
 						{
 							// Check if it's a Cilboxable type
@@ -3126,7 +3126,7 @@ spiperf.End();
 							for( int k = 0; k < exceptions.Count; k++ )
 							{
 								ExceptionHandlingClause c = exceptions[k];
-								SerializedExceptionHandler seh = new SerializedExceptionHandler();
+								SerializedExceptionHandler seh =  new SerializedExceptionHandler();
 								seh.flags = (int)c.Flags;
 								seh.tryOffset = c.TryOffset;
 								seh.tryLength = c.TryLength;
