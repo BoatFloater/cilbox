@@ -18,6 +18,9 @@ namespace Cilbox
 		public CilboxClass cls;
 		public Cilbox box;
 		public String className;
+		// Legacy string (base64 Serializee) payload, kept so existing scenes can still load.
+		public String serializedObjectData;
+		// Preferred binary payload. When present, it is used instead of serializedObjectData.
 		public byte[] serializedObjectBytes;
 
 		public String buildTimeGuid;
@@ -80,13 +83,18 @@ namespace Cilbox
 					continue;
 				}
 
+				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, ref refToProxyMap);
+
 				// Serialize no matter what.
-				lstFields.Add( SerializeProxyField( fv, f.Name, matchingInstanceNameID, ref refToProxyMap ) );
+				lstFields.Add( spf );
 			}
 
-			SerializedProxy proxy = new SerializedProxy();
-			proxy.fields = lstFields.ToArray();
+			SerializedProxy proxy = new SerializedProxy
+			{
+				fields = lstFields.ToArray(),
+			};
 			serializedObjectBytes = proxy.ToBytes();
+			serializedObjectData = null; // new proxies carry binary only; legacy strings still load
 
 			buildTimeGuid = Guid.NewGuid().ToString();
 		}
@@ -125,14 +133,16 @@ namespace Cilbox
 			{
 				spf.fieldType = (byte)ProxyFieldType.CilboxRef;
 				spf.fieldObjectIndex = fieldsObjects.Count;
-				spf.objectRefIsNull = fv.ToString() == "null";
+				spf.objectRefName = fv.ToString();
+				spf.objectRefIsNull = spf.objectRefName == "null";
 				fieldsObjects.Add( refToProxyMap[(MonoBehaviour)fv] );
 			}
 			else if( fv is UnityEngine.Object )
 			{
 				spf.fieldType = (byte)ProxyFieldType.ObjectRef;
 				spf.fieldObjectIndex = fieldsObjects.Count;
-				spf.objectRefIsNull = fv.ToString() == "null";
+				spf.objectRefName = fv.ToString();
+				spf.objectRefIsNull = spf.objectRefName == "null";
 				fieldsObjects.Add( (UnityEngine.Object)fv );
 			}
 			else if( fv is string )
@@ -148,7 +158,7 @@ namespace Cilbox
 			else if( fvType.IsArray )
 			{
 				spf.fieldType = (byte)ProxyFieldType.Array;
-				Type type = fv.GetType().GetElementType();
+				Type type = fvType.GetElementType();
 				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( type );
 				Array arr = (Array)fv;
 				int len = arr.Length;
@@ -163,8 +173,7 @@ namespace Cilbox
 			{
 				spf.fieldType = (byte)ProxyFieldType.Json;
 				spf.data = JsonUtility.ToJson(fv);
-				Type type = fv.GetType();
-				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( type );
+				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( fvType );
 			}
 
 			return spf;
@@ -182,7 +191,8 @@ namespace Cilbox
 			if( proxyWasSetup ) return;
 			if( proxyLoadInProgress ) return;
 			if (box == null) return;
-			if (serializedObjectBytes == null || serializedObjectBytes.Length == 0) return;
+			if (string.IsNullOrEmpty(serializedObjectData) &&
+				(serializedObjectBytes == null || serializedObjectBytes.Length == 0)) return;
 			proxyLoadInProgress = true;
 			try
 			{
@@ -249,11 +259,15 @@ namespace Cilbox
 				}
 
 				// Populate fields[]
-				fields = new StackElement[cls.instanceFieldNames.Length];
+				int fieldCount = cls.instanceFieldNames.Length;
+				fields = new StackElement[fieldCount];
 
-				SerializedProxy proxyData = SerializedProxy.FromBytes( serializedObjectBytes );
+				SerializedProxy proxyData =
+					(serializedObjectBytes != null && serializedObjectBytes.Length > 0)
+						? SerializedProxy.FromBytes( serializedObjectBytes )
+						: SerializedProxy.DeserializeString( serializedObjectData );
 
-				SerializedProxyField[] matchingProxyField = new SerializedProxyField[cls.instanceFieldNames.Length];
+				SerializedProxyField[] matchingProxyField = new SerializedProxyField[fieldCount];
 				foreach( SerializedProxyField spf in proxyData.fields )
 				{
 					// Go over the root objects, to see which ones slot in and how.
@@ -267,7 +281,7 @@ namespace Cilbox
 
 				// Preinitialize every field to its CLR default value so that non-serialized fields
 				// (especially UnityEngine.Object references) are not left as implicit StackType.Boolean.
-				for( int i = 0; i < cls.instanceFieldNames.Length; i++ )
+				for( int i = 0; i < fieldCount; i++ )
 				{
 					Type fieldType = cls.instanceFieldTypes[i];
 					// Maybe need to GetComponentTypeOverride here as well?  Maybe not, since that should only be for actual UnityEngine.Objects, which should be null at this point if they are contraband.
@@ -318,7 +332,7 @@ namespace Cilbox
 				cls.InterpretMethod(this, ImportFunctionID.dotCtor, null);
 
 				// load serialized fields.
-				for( int i = 0; i < cls.instanceFieldNames.Length; i++ )
+				for( int i = 0; i < fieldCount; i++ )
 				{
 					SerializedProxyField spf = matchingProxyField[i];
 
@@ -336,6 +350,7 @@ namespace Cilbox
 
 				proxyWasSetup = true;
 				runtimeFieldsObjects = null;
+				serializedObjectData = null;
 				serializedObjectBytes = null;
 				if (verboseLogging)
 					Debug.Log( $"RuntimeProxyLoad complete for class {className}" );
@@ -486,6 +501,7 @@ namespace Cilbox
 
 			refElement.LoadObject(null);
 		}
+
 
 		void Start() {
 			RuntimeProxyLoad();
