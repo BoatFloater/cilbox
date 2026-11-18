@@ -2059,11 +2059,23 @@ spiperf.End();
 
 		public uint [] importFunctionToId; // from ImportFunctionID
 
+		public String [] baseClassNames = new String[0];
+
+		// cache importFunctionNames because they won't change between Cilbox loads; avoids
+		// reflection lookups on every class load.
+		private static readonly string[] importFunctionNames = BuildImportFunctionNames();
+		private static string[] BuildImportFunctionNames()
+		{
+			string[] names = Enum.GetNames(typeof(ImportFunctionID));
+			names[0] = ".ctor";
+			return names;
+		}
+
 		public bool LoadCilboxClass( Cilbox box, String className, SerializedClass sc )
 		{
 			this.box = box;
 			this.className = sc.className;
-			this.baseClassNames = sc.baseClassNames;
+			this.baseClassNames = sc.baseClassNames ?? new String[0];
 
 			uint id = 0;
 			int sfnum = sc.staticFields.Length;
@@ -2081,6 +2093,8 @@ spiperf.End();
 			int ifnum = sc.instanceFields.Length;
 			instanceFieldNames = new String[ifnum];
 			instanceFieldTypes = new Type[ifnum];
+
+			id = 0;
 			for( int k = 0; k < ifnum; k++ )
 			{
 				String fieldName = instanceFieldNames[id] = sc.instanceFields[k].name;
@@ -2277,8 +2291,8 @@ spiperf.End();
 		}
 
 		abstract public bool CheckMethodAllowed( out MethodInfo mi, Type declaringType, String name, SerializedTypeDescriptor [] parametersIn, SerializedTypeDescriptor [] genericArgumentsIn, String fullSignature );
-		abstract public bool CheckTypeAllowed( String sType );
-		abstract public bool CheckFieldAllowed( String sType, String sFieldName );
+		abstract public bool CheckTypeAllowed( Type t ); //String sType );
+		abstract public bool CheckFieldAllowed( Type t, String sFieldName );
 		abstract public bool GetTypeOverride( String sType, out Type t );
 
 		public delegate void CilboxDisabledEvent( Cilbox box, string reason );
@@ -2370,15 +2384,17 @@ spiperf.End();
 					if( sm.fieldHasIndex )
 					{
 						t.fieldIndex = sm.fieldIndex;
+						if( classes.TryGetValue( t.declaringTypeName, out int fieldClassId ) )
+							t.interpretiveFieldClass = fieldClassId;
 					}
 					else
 					{
-						Type declaringType = usage.GetNativeTypeFromDescriptor( st.typeDescriptor );
-						t.declaringTypeName = declaringType.FullName;
+						Type declaringType = usage.GetNativeTypeFromDescriptor( sm.fieldDeclaringType );
 						if (declaringType == null) 
 						{
-							throw new CilboxException($"Could not find declaring type {t.declaringTypeName} for field {t.Name} in meta {st.metaTokenIndex}.");
+							throw new CilboxException($"Could not find declaring type {t.declaringTypeName} for field {t.Name} in meta {mid+1}.");
 						}
+						t.declaringTypeName = declaringType.FullName;
 
 						bool bAllowed = CheckFieldAllowed( declaringType, t.Name );
 						if( !bAllowed )
@@ -2491,7 +2507,6 @@ spiperf.End();
 
 					SerializedTypeDescriptor[] paramDescs = sm.methodParameters ?? new SerializedTypeDescriptor[0];
 
-					int classid;
 					if( declaringTypeName == null )
 					{
 						Debug.LogError( $"Error: Could not find internal type in {fullSignature}" );
@@ -2516,8 +2531,11 @@ spiperf.End();
 					else
 					{
 						Type declaringType = usage.GetNativeTypeFromDescriptor( stDt );
-						if( declaringType == null )
-							throw new CilboxException( $"Error: Could not find referenced type {useAssembly}/{declaringTypeName}/" );
+						if ( declaringType == null )
+						{
+							Debug.LogError( $"Error: Could not find referenced type {useAssembly}/{declaringTypeName}/ {fullSignature}" );
+							break;
+						}
 
 						MethodBase m = usage.GetNativeMethodFromTypeAndName( declaringType, name, paramDescs,
 							genericArguments, fullSignature );
@@ -3215,6 +3233,15 @@ spiperf.End();
 					}
 
 					sc.methods = allClassMethods[type.FullName];
+
+					// Only [Cilboxable] ancestors are recorded: a native/prohibited base is never emitted, so GetComponent<T>
+					// base-matching can never name a non-sandboxed class (and a match only ever yields an interpreted proxy).
+					List< string > baseClassChain = new List< string >();
+					for( Type bt = type.BaseType; bt != null && bt != typeof( UnityEngine.MonoBehaviour ) && bt != typeof( object ); bt = bt.BaseType )
+						if( CilboxUtil.HasCilboxableAttribute( bt ) )
+							baseClassChain.Add( bt.FullName );
+					sc.baseClassNames = baseClassChain.ToArray();
+
 					classes[type.FullName] = sc;
 					perfType.End();
 				}

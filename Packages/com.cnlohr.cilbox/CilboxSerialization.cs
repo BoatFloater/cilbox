@@ -822,11 +822,13 @@ namespace Cilbox
 		public SerializedField[] staticFields;
 		public SerializedField[] instanceFields;
 		public SerializedMethod[] methods;
+		public string[] baseClassNames;
 
 		const byte T_ClassName = 1;
 		const byte T_StaticFields = 2;
 		const byte T_InstanceFields = 3;
 		const byte T_Methods = 4;
+		const byte T_BaseClassNames = 5;
 
 		public static readonly BinaryHelper.ReadFunc<SerializedClass> ReadDelegate = Read;
 
@@ -844,6 +846,7 @@ namespace Cilbox
 					case T_StaticFields: c.staticFields = BinaryHelper.ReadArray(ref ctx, SerializedField.ReadDelegate); break;
 					case T_InstanceFields: c.instanceFields = BinaryHelper.ReadArray(ref ctx, SerializedField.ReadDelegate); break;
 					case T_Methods: c.methods = BinaryHelper.ReadArray(ref ctx, SerializedMethod.ReadDelegate); break;
+					case T_BaseClassNames: c.baseClassNames = BinaryHelper.ReadArray(ref ctx, (ref ReadContext r) => BinaryHelper.ReadPooledString(ref r)); break;
 				}
 				ctx.pos = fieldEnd;
 			}
@@ -858,6 +861,8 @@ namespace Cilbox
 				BinaryHelper.WriteField(c, T_StaticFields, c2 => BinaryHelper.WriteArray(c2.body, staticFields, e => e.Write(c2)));
 				BinaryHelper.WriteField(c, T_InstanceFields, c2 => BinaryHelper.WriteArray(c2.body, instanceFields, e => e.Write(c2)));
 				BinaryHelper.WriteField(c, T_Methods, c2 => BinaryHelper.WriteArray(c2.body, methods, e => e.Write(c2)));
+				if (baseClassNames != null && baseClassNames.Length > 0)
+					BinaryHelper.WriteField(c, T_BaseClassNames, c2 => BinaryHelper.WriteArray(c2.body, baseClassNames, s => BinaryHelper.WritePooledString(c2, s)));
 			});
 		}
 	}

@@ -108,6 +108,7 @@ namespace Cilbox
 			bool hasCilboxable = CilboxUtil.HasCilboxableAttribute( fv.GetType() );
 
 			StackType st;
+			Type fvType = fv.GetType();
 
 			// Serialize enum field as underlying type
 			if( fvType.IsEnum )
@@ -181,7 +182,7 @@ namespace Cilbox
 			if( proxyWasSetup ) return;
 			if( proxyLoadInProgress ) return;
 			if (box == null) return;
-			if (string.IsNullOrEmpty(serializedObjectData)) return;
+			if (serializedObjectBytes == null || serializedObjectBytes.Length == 0) return;
 			proxyLoadInProgress = true;
 			try
 			{
@@ -357,6 +358,17 @@ namespace Cilbox
 		}
 
 
+		// Loads the reference StackElement with the appropriate data
+		private void LoadProxyFieldStackElement( SerializedProxyField spf, ref StackElement refElement, String rootFieldName )
+		{
+			object o;
+			bool bIsObject = LoadObjectFromProxyField( spf, out o, rootFieldName, null );
+			if( bIsObject )
+				refElement.LoadObject( o );
+			else
+				refElement.Load( o );
+		}
+
 		// Returns: true if is object, otherwise is primitive.
 		private bool LoadObjectFromProxyField( SerializedProxyField spf, out object oOut, String rootFieldName, Type inType )
 		{
@@ -369,7 +381,7 @@ namespace Cilbox
 			case ProxyFieldType.ObjectRef:
 			{
 				int iFO = spf.fieldObjectIndex;
-				if( iFO < objectSlots.Count )
+				if( iFO >= 0 && iFO < objectSlots.Count )
 				{
 					if( spf.objectRefIsNull )
 					{
@@ -422,7 +434,7 @@ namespace Cilbox
 					}
 				}
 
-				if( !isCilboxElementType && !box.CheckTypeAllowed( t.ToString() ) )
+				if( !isCilboxElementType && !box.CheckTypeAllowed( t ) )
 				{
 					proxyWasSetup = false;
 					throw new Exception( $"Contraband ARRAY found in script {className} field {rootFieldName}" );
