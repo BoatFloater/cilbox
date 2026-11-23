@@ -1068,9 +1068,24 @@ namespace TestCilbox
 	[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true)]
 	public class AttributeProbeTarget : Attribute { }
 
+	public class CharProbeAttribute : Attribute
+	{
+		public CharProbeAttribute( char c, char[] cs ) { }
+	}
+
+	public class TypeProbeAttribute : Attribute
+	{
+		public TypeProbeAttribute( Type t, Type[] ts ) { }
+	}
+
+	[CharProbe( 'x', new char[] { 'a', 'b' } ), TypeProbe( typeof( string ), new Type[] { typeof( int ), typeof( object ) } )]
+	public class CharProbeTarget { }
+
 	public class MetadataProbeAttribute : Attribute
 	{
-		public MetadataProbeAttribute( string label, int[] numbers ) { }
+		public string Label;
+		public int[] Numbers;
+		public MetadataProbeAttribute( string label, int[] numbers ) { Label = label; Numbers = numbers; }
 		public int Number;
 		public Type Kind { get; set; }
 	}

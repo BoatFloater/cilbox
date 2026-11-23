@@ -15,15 +15,12 @@ namespace Cilbox
 		public SerializedTypeDescriptor[] genericArgs;
 		// Underlying type (present when underlyingType token written)
 		public SerializedTypeDescriptor underlyingType;
-		// The type's TypeDef flags column (visibility, Serializable, Abstract, ...); only set on a class/enum's own "ty" descriptor,
-		// and written only when nonzero.
-		public TypeAttributes flags;
 
 		public bool IsGeneric => genericArgs != null && genericArgs.Length > 0;
 		public bool HasUnderlyingType => underlyingType != null;
 
 		// Mirrors CilboxUtil.GetSerializeeFromNativeType key order: a, then
-		// (n, gn, g) for generics or (n, [ut]) otherwise, then the optional tf.
+		// (n, gn, g) for generics or (n, [ut]) otherwise.
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
@@ -43,8 +40,6 @@ namespace Cilbox
 				if( underlyingType != null )
 					ret["ut"] = underlyingType.ToSerializee();
 			}
-			if( flags != 0 )
-				ret["tf"] = new Serializee( ((int)flags).ToString() );
 			return new Serializee( ret );
 		}
 
@@ -64,8 +59,6 @@ namespace Cilbox
 			}
 			if( m.TryGetValue( "ut", out Serializee ut ) )
 				td.underlyingType = FromSerializee( ut );
-			if( m.TryGetValue( "tf", out Serializee tf ) )
-				td.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
 			return td;
 		}
 
@@ -81,127 +74,57 @@ namespace Cilbox
 		}
 	}
 
-	public class SerializedAttributeArgument
+	// Value of a named argument is a proxy field; the member name is kept separately because an Empty
+	// (null) proxy field does not serialize its fieldName.
+	public class SerializedNamedArgument
 	{
-		public SerializedTypeDescriptor type;      // declared argument type
-		// null / string / primitive (enums as their underlying type) / object[] for arrays; unused for System.Type.
-		// Stored on the wire in the same representation as proxy fields.
-		public object value;
-		public SerializedTypeDescriptor elementType; // arrays only
-		public SerializedTypeDescriptor typeValue; // value of a System.Type argument
-		public string name;                        // named arguments only
-		public bool isField;                       // named arguments only: field (true) or property (false)
+		public string name;
+		public SerializedProxyField value;
 
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			if( name != null )
-			{
-				ret["n"] = new Serializee( name );
-				if( isField ) ret["f"] = new Serializee( "1" );
-			}
-			ret["t"] = type.ToSerializee();
-			if( typeValue != null ) ret["tv"] = typeValue.ToSerializee();
-			else ret["v"] = EncodeValue( value, elementType ).ToSerializee();
+			ret["n"] = new Serializee( name );
+			ret["v"] = value.ToSerializee();
 			return new Serializee( ret );
 		}
 
-		public static SerializedAttributeArgument FromSerializee( Serializee s )
+		public static SerializedNamedArgument FromSerializee( Serializee s )
 		{
 			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedAttributeArgument a = new SerializedAttributeArgument();
-			if( m.TryGetValue( "n", out Serializee n ) ) a.name = n.AsString();
-			a.isField = m.ContainsKey( "f" );
-			a.type = SerializedTypeDescriptor.FromSerializee( m["t"] );
-			if( m.TryGetValue( "tv", out Serializee tv ) )
-			{
-				a.typeValue = SerializedTypeDescriptor.FromSerializee( tv );
-			}
-			else
-			{
-				SerializedProxyField f = SerializedProxyField.FromSerializee( m["v"] );
-				a.value = DecodeValue( f );
-				a.elementType = f.elementType;
-			}
+			SerializedNamedArgument a = new SerializedNamedArgument();
+			a.name = m["n"].AsString();
+			a.value = SerializedProxyField.FromSerializee( m["v"] );
 			return a;
-		}
-
-		public static Serializee[] ToSerializeeArray( SerializedAttributeArgument[] args )
-		{
-			Serializee[] ret = new Serializee[args.Length];
-			for( int i = 0; i < args.Length; i++ )
-				ret[i] = args[i].ToSerializee();
-			return ret;
-		}
-
-		public static SerializedAttributeArgument[] FromSerializeeArray( Serializee s )
-		{
-			Serializee[] arr = s.AsArray();
-			SerializedAttributeArgument[] ret = new SerializedAttributeArgument[arr.Length];
-			for( int i = 0; i < arr.Length; i++ )
-				ret[i] = FromSerializee( arr[i] );
-			return ret;
-		}
-
-		private static SerializedProxyField EncodeValue( object v, SerializedTypeDescriptor elementType )
-		{
-			SerializedProxyField f = new SerializedProxyField();
-			f.matchingInstanceId = -1;
-			switch( v )
-			{
-				case null:
-					f.fieldType = (byte)ProxyFieldType.Empty;
-					break;
-				case string s:
-					f.fieldType = (byte)ProxyFieldType.String;
-					f.data = s;
-					break;
-				case object[] arr:
-					f.fieldType = (byte)ProxyFieldType.Array;
-					f.elementType = elementType;
-					f.arrayElements = new SerializedProxyField[arr.Length];
-					for( int i = 0; i < arr.Length; i++ )
-						f.arrayElements[i] = EncodeValue( arr[i], null );
-					break;
-				default:
-					if( !StackElement.TypeToStackType.TryGetValue( v.GetType().ToString(), out StackType st ) || st >= StackType.Object )
-						throw new CilboxException( $"Unsupported attribute argument value type {v.GetType()}" );
-					f.fieldType = (byte)ProxyFieldType.Primitive;
-					f.primitiveValue.Unbox( v, st );
-					break;
-			}
-			return f;
-		}
-
-		private static object DecodeValue( SerializedProxyField f )
-		{
-			switch( (ProxyFieldType)f.fieldType )
-			{
-				case ProxyFieldType.Empty:     return null;
-				case ProxyFieldType.String:    return f.data;
-				case ProxyFieldType.Primitive: return f.primitiveValue.Box();
-				case ProxyFieldType.Array:
-					object[] values = new object[f.arrayElements.Length];
-					for( int i = 0; i < values.Length; i++ )
-						values[i] = DecodeValue( f.arrayElements[i] );
-					return values;
-				default: throw new CilboxException( $"Unsupported attribute argument value type {(ProxyFieldType)f.fieldType}" );
-			}
 		}
 	}
 
+	// Argument values use the proxy field representation: null (Empty), string, primitive (enums as their
+	// underlying type, char as ushort), System.Type, and arrays of those.
 	public class SerializedCustomAttribute
 	{
 		public SerializedTypeDescriptor attributeType;
-		public SerializedAttributeArgument[] ctorArgs = new SerializedAttributeArgument[0];
-		public SerializedAttributeArgument[] namedArgs = new SerializedAttributeArgument[0];
+		public SerializedProxyField[] ctorArgs = new SerializedProxyField[0];
+		public SerializedNamedArgument[] namedArgs = new SerializedNamedArgument[0];
 
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
 			ret["t"] = attributeType.ToSerializee();
-			if( ctorArgs.Length > 0 ) ret["a"] = new Serializee( SerializedAttributeArgument.ToSerializeeArray( ctorArgs ) );
-			if( namedArgs.Length > 0 ) ret["n"] = new Serializee( SerializedAttributeArgument.ToSerializeeArray( namedArgs ) );
+			if( ctorArgs.Length > 0 )
+			{
+				Serializee[] ca = new Serializee[ctorArgs.Length];
+				for( int i = 0; i < ca.Length; i++ )
+					ca[i] = ctorArgs[i].ToSerializee();
+				ret["a"] = new Serializee( ca );
+			}
+			if( namedArgs.Length > 0 )
+			{
+				Serializee[] na = new Serializee[namedArgs.Length];
+				for( int i = 0; i < na.Length; i++ )
+					na[i] = namedArgs[i].ToSerializee();
+				ret["n"] = new Serializee( na );
+			}
 			return new Serializee( ret );
 		}
 
@@ -210,8 +133,20 @@ namespace Cilbox
 			Dictionary<String, Serializee> m = s.AsMap();
 			SerializedCustomAttribute ca = new SerializedCustomAttribute();
 			ca.attributeType = SerializedTypeDescriptor.FromSerializee( m["t"] );
-			if( m.TryGetValue( "a", out Serializee a ) ) ca.ctorArgs = SerializedAttributeArgument.FromSerializeeArray( a );
-			if( m.TryGetValue( "n", out Serializee n ) ) ca.namedArgs = SerializedAttributeArgument.FromSerializeeArray( n );
+			if( m.TryGetValue( "a", out Serializee a ) )
+			{
+				Serializee[] arr = a.AsArray();
+				ca.ctorArgs = new SerializedProxyField[arr.Length];
+				for( int i = 0; i < arr.Length; i++ )
+					ca.ctorArgs[i] = SerializedProxyField.FromSerializee( arr[i] );
+			}
+			if( m.TryGetValue( "n", out Serializee n ) )
+			{
+				Serializee[] arr = n.AsArray();
+				ca.namedArgs = new SerializedNamedArgument[arr.Length];
+				for( int i = 0; i < arr.Length; i++ )
+					ca.namedArgs[i] = SerializedNamedArgument.FromSerializee( arr[i] );
+			}
 			return ca;
 		}
 
@@ -431,8 +366,7 @@ namespace Cilbox
 		public SerializedField[] instanceFields;
 		public SerializedMethod[] methods;
 		public string[] baseClassNames;
-		public SerializedTypeDescriptor type;
-		public SerializedTypeDescriptor baseType;
+		public TypeAttributes flags;
 		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// className is the enclosing Map key. Master classProps order:
@@ -464,8 +398,8 @@ namespace Cilbox
 			}
 			ret["baseClasses"] = new Serializee(bcn.ToArray());
 
-			if( type != null ) ret["ty"] = type.ToSerializee();
-			if( baseType != null ) ret["bt"] = baseType.ToSerializee();
+			if( flags != 0 )
+				ret["tf"] = new Serializee( ((int)flags).ToString() );
 			if( customAttributes.Length > 0 )
 				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 
@@ -506,8 +440,8 @@ namespace Cilbox
 				sc.baseClassNames = new String[0];
 			}
 
-			if( m.TryGetValue( "ty", out Serializee ty ) ) sc.type = SerializedTypeDescriptor.FromSerializee( ty );
-			if( m.TryGetValue( "bt", out Serializee bt ) ) sc.baseType = SerializedTypeDescriptor.FromSerializee( bt );
+			if( m.TryGetValue( "tf", out Serializee tf ) )
+				sc.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
 			if( m.TryGetValue( "ca", out Serializee caSer ) )
 				sc.customAttributes = SerializedCustomAttribute.FromSerializeeArray( caSer );
 
@@ -691,7 +625,7 @@ namespace Cilbox
 	public class SerializedEnum
 	{
 		public string enumName;
-		public SerializedTypeDescriptor type;
+		public TypeAttributes flags;
 		public SerializedTypeDescriptor underlyingType;
 		public SerializedEnumValue[] values;
 		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
@@ -705,8 +639,8 @@ namespace Cilbox
 			for( int i = 0; i < values.Length; i++ )
 				vals[i] = values[i].ToSerializee();
 			ret["values"] = new Serializee( vals );
-			if( type != null )
-				ret["ty"] = type.ToSerializee();
+			if( flags != 0 )
+				ret["tf"] = new Serializee( ((int)flags).ToString() );
 			if( customAttributes.Length > 0 )
 				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
@@ -722,8 +656,8 @@ namespace Cilbox
 			e.values = new SerializedEnumValue[vals.Length];
 			for( int i = 0; i < vals.Length; i++ )
 				e.values[i] = SerializedEnumValue.FromSerializee( vals[i] );
-			if( m.TryGetValue( "ty", out Serializee ty ) )
-				e.type = SerializedTypeDescriptor.FromSerializee( ty );
+			if( m.TryGetValue( "tf", out Serializee tf ) )
+				e.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
 			if( m.TryGetValue( "ca", out Serializee ca ) )
 				e.customAttributes = SerializedCustomAttribute.FromSerializeeArray( ca );
 			return e;
@@ -843,14 +777,6 @@ namespace Cilbox
 			}
 			return td;
 		}
-
-		// Builds a descriptor for a type's own TypeDef row, which (unlike a plain reference) carries the type flags.
-		public static SerializedTypeDescriptor FromNativeTypeDef(Type t)
-		{
-			var td = FromNativeType(t);
-			td.flags = t.Attributes;
-			return td;
-		}
 	}
 
 	public enum ProxyFieldType : byte
@@ -862,6 +788,7 @@ namespace Cilbox
 		ObjectRef   = 4,  // "obj" — UnityEngine.Object reference
 		Array       = 5,  // "a"
 		Json        = 6,  // "j" — JsonUtility-serialized struct
+		Type        = 7,  // "ty" — System.Type value, the type is in elementType
 	}
 
 	// Primitive-only value payload. 16 bytes (no object slot). NOTE: keep the
@@ -987,6 +914,25 @@ namespace Cilbox
 			return v;
 		}
 
+		// Decodes the kinds that can be a custom attribute argument: null, string, primitive, System.Type (null if the type
+		// is unavailable) and arrays of those as object[].
+		public object ToObject( CilboxUsage usage )
+		{
+			switch( (ProxyFieldType)fieldType )
+			{
+				case ProxyFieldType.Empty:     return null;
+				case ProxyFieldType.String:    return data;
+				case ProxyFieldType.Primitive: return primitiveValue.Box();
+				case ProxyFieldType.Type:      return usage.GetNativeTypeFromDescriptor( elementType, false );
+				case ProxyFieldType.Array:
+					object[] values = new object[arrayElements.Length];
+					for( int i = 0; i < values.Length; i++ )
+						values[i] = arrayElements[i].ToObject( usage );
+					return values;
+				default: throw new CilboxException( $"Unsupported value type {(ProxyFieldType)fieldType}" );
+			}
+		}
+
 		// Mirrors CilboxProxy.SerializeThing. Empty fields emit ONLY {empty:"true"}.
 		// Otherwise: [n], [miid], then type-specific keys in master's exact order.
 		public Serializee ToSerializee()
@@ -1036,6 +982,10 @@ namespace Cilbox
 				case ProxyFieldType.Json:
 					f["t"] = new Serializee( "j" );
 					f["d"] = new Serializee( data );
+					f["at"] = elementType.ToSerializee();
+					break;
+				case ProxyFieldType.Type:
+					f["t"] = new Serializee( "ty" );
 					f["at"] = elementType.ToSerializee();
 					break;
 			}
@@ -1092,6 +1042,11 @@ namespace Cilbox
 			{
 				f.fieldType = (byte)ProxyFieldType.Json;
 				f.data = m["d"].AsString();
+				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
+			}
+			else if( t == "ty" )
+			{
+				f.fieldType = (byte)ProxyFieldType.Type;
 				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
 			}
 			else if( t.Length > 0 && t[0] == 'e' )
@@ -1159,65 +1114,59 @@ namespace Cilbox
 				SerializedCustomAttribute row = new SerializedCustomAttribute();
 				row.attributeType = SerializedTypeDescriptorBuilder.FromNativeType( d.AttributeType );
 
-				row.ctorArgs = new SerializedAttributeArgument[d.ConstructorArguments.Count];
+				row.ctorArgs = new SerializedProxyField[d.ConstructorArguments.Count];
 				for( int i = 0; i < row.ctorArgs.Length; i++ )
 					row.ctorArgs[i] = FromTypedArgument( d.ConstructorArguments[i] );
 
-				row.namedArgs = new SerializedAttributeArgument[d.NamedArguments.Count];
+				row.namedArgs = new SerializedNamedArgument[d.NamedArguments.Count];
 				for( int i = 0; i < row.namedArgs.Length; i++ )
 				{
 					CustomAttributeNamedArgument na = d.NamedArguments[i];
-					SerializedAttributeArgument arg = FromTypedArgument( na.TypedValue );
-					arg.name = na.MemberName;
-					arg.isField = na.IsField;
-					row.namedArgs[i] = arg;
+					row.namedArgs[i] = new SerializedNamedArgument { name = na.MemberName, value = FromTypedArgument( na.TypedValue ) };
 				}
 				rows.Add( row );
 			}
 			return rows.ToArray();
 		}
 
-		private static SerializedAttributeArgument FromTypedArgument( CustomAttributeTypedArgument a )
+		private static SerializedProxyField FromTypedArgument( CustomAttributeTypedArgument a )
 		{
 			// An argument declared as object carries its real value as a nested typed argument.
 			if( a.Value is CustomAttributeTypedArgument inner )
 				return FromTypedArgument( inner );
 
-			SerializedAttributeArgument r = new SerializedAttributeArgument();
-			r.type = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType );
-			if( a.Value is Type t )
-				r.typeValue = SerializedTypeDescriptorBuilder.FromNativeType( t );
-			else
-				r.value = ValueFromTypedArgument( a );
-			if( r.value is object[] )
-				r.elementType = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType.GetElementType() );
-			return r;
-		}
-
-		// Returns null, a string, a boxed primitive (enums as their underlying type) or object[] for arrays.
-		private static object ValueFromTypedArgument( CustomAttributeTypedArgument a )
-		{
-			if( a.Value is CustomAttributeTypedArgument inner )
-				return ValueFromTypedArgument( inner );
-
+			SerializedProxyField f = new SerializedProxyField();
+			f.matchingInstanceId = -1;
 			switch( a.Value )
 			{
 			case null:
-			case string:
-				return a.Value;
+				f.fieldType = (byte)ProxyFieldType.Empty;
+				break;
+			case string s:
+				f.fieldType = (byte)ProxyFieldType.String;
+				f.data = s;
+				break;
+			case Type t:
+				f.fieldType = (byte)ProxyFieldType.Type;
+				f.elementType = SerializedTypeDescriptorBuilder.FromNativeType( t );
+				break;
 			case IReadOnlyCollection<CustomAttributeTypedArgument> elems:
-				object[] values = new object[elems.Count];
+				f.fieldType = (byte)ProxyFieldType.Array;
+				f.elementType = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType.GetElementType() );
+				f.arrayElements = new SerializedProxyField[elems.Count];
 				int n = 0;
 				foreach( CustomAttributeTypedArgument e in elems )
-					values[n++] = ValueFromTypedArgument( e );
-				return values;
+					f.arrayElements[n++] = FromTypedArgument( e );
+				break;
 			default:
+				// Enums are stored as their underlying type, and char (not a StackType) as a ushort, like the interpreter does.
 				object v = a.ArgumentType.IsEnum ? Convert.ChangeType( a.Value, Enum.GetUnderlyingType( a.ArgumentType ) ) : a.Value;
-				if( StackElement.TypeToStackType.TryGetValue( v.GetType().ToString(), out StackType st ) && st < StackType.Object )
-					return v;
-				// Not a StackType primitive (e.g. char, or a System.Type inside an array).
-				return v is Type vt ? vt.FullName : Convert.ToString( v );
+				if( v is char c ) v = (ushort)c;
+				f.fieldType = (byte)ProxyFieldType.Primitive;
+				f.primitiveValue.Unbox( v, StackElement.TypeToStackType[v.GetType().ToString()] );
+				break;
 			}
+			return f;
 		}
 	}
 #endif
