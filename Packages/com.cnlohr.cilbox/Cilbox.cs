@@ -69,15 +69,19 @@ namespace Cilbox
 		public CilboxExceptionHandlingClause[] exceptionClauses;
 		public bool hasExceptionClauses = false;
 		public Dictionary<int, CilboxExceptionHandlingClause> handlerOffsetToClauseMap;
+		public SerializedCustomAttribute[] customAttributes;
 
 #if UNITY_EDITOR
 		ProfilerMarker perfMarkerInterpret;
 #endif
 
+		public bool HasAttribute( string attributeTypeName ) => Array.Exists( customAttributes, a => a.attributeType.typeName == attributeTypeName );
+
 		public void Load( CilboxClass cclass, SerializedMethod sm )
 		{
 			parentClass = cclass;
 			methodName = sm.methodName;
+			customAttributes = sm.customAttributes;
 			byteCode = sm.body;
 			MaxStackSize = sm.maxStack;
 			isVoid = sm.isVoid;
@@ -2051,6 +2055,23 @@ spiperf.End();
 		public String[] instanceFieldNames;
 		public Type[] instanceFieldTypes;
 
+		// Metadata columns, as in CIL: the type's own descriptor (carries the TypeDef flags), the base type, and the custom
+		// attribute table.  Attributes are matched by type name (not resolved), so the sandbox type whitelist does not affect them.
+		public SerializedTypeDescriptor type;
+		public SerializedTypeDescriptor baseType;
+		public SerializedCustomAttribute[] customAttributes;
+		public SerializedField[] staticFieldRows;
+		public SerializedField[] instanceFieldRows;
+
+		public TypeAttributes typeFlags => type?.flags ?? 0;
+
+		private static bool HasAttribute( SerializedCustomAttribute[] rows, string attributeTypeName ) => Array.Exists( rows, a => a.attributeType.typeName == attributeTypeName );
+		public bool HasTypeAttribute( string attributeTypeName ) => HasAttribute( customAttributes, attributeTypeName );
+		public FieldAttributes GetInstanceFieldFlags( int index ) => instanceFieldRows[index].flags;
+		public bool HasInstanceFieldAttribute( int index, string attributeTypeName ) => HasAttribute( instanceFieldRows[index].customAttributes, attributeTypeName );
+		public FieldAttributes GetStaticFieldFlags( int index ) => staticFieldRows[index].flags;
+		public bool HasStaticFieldAttribute( int index, string attributeTypeName ) => HasAttribute( staticFieldRows[index].customAttributes, attributeTypeName );
+
 		public Dictionary< String, uint > methodNameToIndex;
 		public Dictionary< String, uint > methodFullSignatureToIndex;
 
@@ -2075,6 +2096,11 @@ spiperf.End();
 			this.box = box;
 			this.className = sc.className;
 			this.baseClassNames = sc.baseClassNames;
+			this.type = sc.type;
+			this.baseType = sc.baseType;
+			this.customAttributes = sc.customAttributes;
+			this.staticFieldRows = sc.staticFields;
+			this.instanceFieldRows = sc.instanceFields;
 
 			int sfnum = sc.staticFields.Length;
 			this.staticFields = new object[sfnum];
@@ -2153,8 +2179,13 @@ spiperf.End();
 	public class CilboxEnum
 	{
 		public string enumName;
+		public SerializedTypeDescriptor type;
+		public SerializedCustomAttribute[] customAttributes;
 		public StackType underlyingType;
 		public Dictionary<long, string> valueToName;
+
+		public TypeAttributes typeFlags => type?.flags ?? 0;
+		public bool HasAttribute( string attributeTypeName ) => Array.Exists( customAttributes, a => a.attributeType.typeName == attributeTypeName );
 
 		public string GetName(long value)
 		{
@@ -2339,6 +2370,8 @@ spiperf.End();
 				{
 					CilboxEnum ce = new CilboxEnum();
 					ce.enumName = se.enumName;
+					ce.type = se.type;
+					ce.customAttributes = se.customAttributes;
 					ce.underlyingType = StackElement.StackTypeFromType(usage.GetNativeTypeFromDescriptor(se.underlyingType));
 					ce.valueToName = new Dictionary<long, string>();
 					foreach (var entry in se.values)
@@ -3154,6 +3187,7 @@ spiperf.End();
 							serializedMethod.isCtor = isCtor;
 							serializedMethod.isStatic = m.IsStatic;
 							serializedMethod.fullSignature = m.ToString();
+							serializedMethod.customAttributes = SerializedCustomAttributeBuilder.FromMember( m );
 
 							methods.Add( serializedMethod );
 							perfMethod.End();
@@ -3203,6 +3237,8 @@ spiperf.End();
 							SerializedField dictField = new SerializedField();
 							dictField.name = f.Name;
 							dictField.type = SerializedTypeDescriptorBuilder.FromNativeType( f.FieldType );
+							dictField.flags = f.Attributes;
+							dictField.customAttributes = SerializedCustomAttributeBuilder.FromMember( f );
 							fields.Add( dictField );
 
 							// Fill in our metadata with a class-specific field ID, if this field ID was used in code anywhere.
@@ -3228,6 +3264,10 @@ spiperf.End();
 						if( CilboxUtil.HasCilboxableAttribute( bt ) )
 							baseClassChain.Add( bt.FullName );
 					serializedClass.baseClassNames = baseClassChain.ToArray();
+					serializedClass.type = SerializedTypeDescriptorBuilder.FromNativeType( type );
+					if( type.BaseType != null )
+						serializedClass.baseType = SerializedTypeDescriptorBuilder.FromNativeType( type.BaseType );
+					serializedClass.customAttributes = SerializedCustomAttributeBuilder.FromMember( type );
 					classes.Add(serializedClass);
 					perfType.End();
 				}
@@ -3244,6 +3284,8 @@ spiperf.End();
 						continue;
 					SerializedEnum serializedEnum  = new SerializedEnum();
 					serializedEnum.enumName = type.FullName;
+					serializedEnum.type = SerializedTypeDescriptorBuilder.FromNativeType(type);
+					serializedEnum.customAttributes = SerializedCustomAttributeBuilder.FromMember(type);
 					serializedEnum.underlyingType = SerializedTypeDescriptorBuilder.FromNativeType(type.GetEnumUnderlyingType());
 					string[] names = Enum.GetNames(type);
 					Array values = Enum.GetValues(type);
