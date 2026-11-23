@@ -1021,39 +1021,41 @@ namespace TestCilbox
 			Validator.Validate("Meta Type Serializable Not A Row", "True");
 			Validator.Set("Meta Type Probe", cc.HasTypeAttribute(probe).ToString());
 			Validator.Validate("Meta Type Probe", "True");
-			Validator.Set("Meta Base Type", cc.baseType?.typeName);
+			Validator.Set("Meta Base Type", cc.baseTypeName);
 			Validator.Validate("Meta Base Type", "UnityEngine.MonoBehaviour");
 
-			SerializedCustomAttribute typeProbe = cc.customAttributes.First(a => a.attributeType.typeName == probe);
-			Validator.Set("Meta Probe Ctor String", typeProbe.ctorArgs[0].text);
+			CilboxCustomAttribute typeProbe = cc.customAttributes.First(a => a.AttributeTypeName == probe);
+			Validator.Set("Meta Probe Ctor String", (string)typeProbe.ConstructorArguments[0].Value);
 			Validator.Validate("Meta Probe Ctor String", "on class");
-			Validator.Set("Meta Probe Ctor Array", string.Join(",", typeProbe.ctorArgs[1].elements.Select(e => e.text)));
-			Validator.Validate("Meta Probe Ctor Array", "1,2");
-			Validator.Set("Meta Probe Named Field", $"{typeProbe.namedArgs[0].name}={typeProbe.namedArgs[0].text}/{typeProbe.namedArgs[0].isField}");
-			Validator.Validate("Meta Probe Named Field", "Number=7/True");
+			Validator.Set("Meta Probe Ctor Array", string.Join(",", ((object[])typeProbe.ConstructorArguments[1].Value).Select(e => $"{e}:{e.GetType().Name}")));
+			Validator.Validate("Meta Probe Ctor Array", "1:Int32,2:Int32");
+			CilboxCustomAttributeArgument numberArg = typeProbe.NamedArguments[0];
+			Validator.Set("Meta Probe Named Field", $"{numberArg.Name}={numberArg.Value}:{numberArg.Value.GetType().Name}/{numberArg.IsField}");
+			Validator.Validate("Meta Probe Named Field", "Number=7:Int32/True");
 
 			int serializedPrivate = FieldIndex("serializedPrivate");
 			Validator.Set("Meta SerializeField", cc.HasInstanceFieldAttribute(serializedPrivate, "UnityEngine.SerializeField").ToString());
 			Validator.Validate("Meta SerializeField", "True");
-			Validator.Set("Meta Private Flag", ((cc.GetInstanceFieldFlags(serializedPrivate) & FieldAttributes.FieldAccessMask) == FieldAttributes.Private).ToString());
+			Validator.Set("Meta Private Flag", ((cc.instanceFieldFlags[serializedPrivate] & FieldAttributes.FieldAccessMask) == FieldAttributes.Private).ToString());
 			Validator.Validate("Meta Private Flag", "True");
 
 			int nonSerialized = FieldIndex("nonSerializedPublic");
-			Validator.Set("Meta NonSerialized Flag", ((cc.GetInstanceFieldFlags(nonSerialized) & FieldAttributes.NotSerialized) != 0).ToString());
+			Validator.Set("Meta NonSerialized Flag", ((cc.instanceFieldFlags[nonSerialized] & FieldAttributes.NotSerialized) != 0).ToString());
 			Validator.Validate("Meta NonSerialized Flag", "True");
 			Validator.Set("Meta NonSerialized Not A Row", (!cc.HasInstanceFieldAttribute(nonSerialized, "System.NonSerializedAttribute")).ToString());
 			Validator.Validate("Meta NonSerialized Not A Row", "True");
 
-			Validator.Set("Meta InitOnly Flag", ((cc.GetInstanceFieldFlags(FieldIndex("readonlyPublic")) & FieldAttributes.InitOnly) != 0).ToString());
+			Validator.Set("Meta InitOnly Flag", ((cc.instanceFieldFlags[FieldIndex("readonlyPublic")] & FieldAttributes.InitOnly) != 0).ToString());
 			Validator.Validate("Meta InitOnly Flag", "True");
 
-			SerializedCustomAttribute fieldProbe = cc.instanceFieldRows[FieldIndex("probed")].customAttributes.First(a => a.attributeType.typeName == probe);
-			Validator.Set("Meta Field Probe Null Array", fieldProbe.ctorArgs[1].isNull.ToString());
+			CilboxCustomAttribute fieldProbe = cc.instanceFieldAttributes[FieldIndex("probed")].First(a => a.AttributeTypeName == probe);
+			Validator.Set("Meta Field Probe Null Array", (fieldProbe.ConstructorArguments[1].Value == null).ToString());
 			Validator.Validate("Meta Field Probe Null Array", "True");
-			Validator.Set("Meta Field Probe Named Property", $"{fieldProbe.namedArgs[0].name}={fieldProbe.namedArgs[0].typeValue.typeName}/{fieldProbe.namedArgs[0].isField}");
+			CilboxCustomAttributeArgument kindArg = fieldProbe.NamedArguments[0];
+			Validator.Set("Meta Field Probe Named Property", $"{kindArg.Name}={kindArg.TypeValueName}/{kindArg.IsField}");
 			Validator.Validate("Meta Field Probe Named Property", "Kind=System.String/False");
 
-			Validator.Set("Meta Plain No Attributes", (cc.instanceFieldRows[FieldIndex("plain")].customAttributes.Length == 0).ToString());
+			Validator.Set("Meta Plain No Attributes", (cc.instanceFieldAttributes[FieldIndex("plain")].Length == 0).ToString());
 			Validator.Validate("Meta Plain No Attributes", "True");
 
 			// Compiler-emitted attributes are real CIL rows and are kept.
@@ -1062,11 +1064,6 @@ namespace TestCilbox
 			CilboxMethod probeMethod = cc.methods.First(m => m.methodName == "Probe");
 			Validator.Set("Meta Method Probe", probeMethod.HasAttribute(probe).ToString());
 			Validator.Validate("Meta Method Probe", "True");
-
-			// Type descriptors carry the TypeDef flags of the type they name.
-			TypeAttributes intFlags = cc.instanceFieldRows[FieldIndex("probed")].type.flags;
-			Validator.Set("Meta Descriptor Flags", $"{(intFlags & TypeAttributes.Serializable) != 0}/{intFlags == typeof(int).Attributes}");
-			Validator.Validate("Meta Descriptor Flags", "True/True");
 		}
 
 		private static void ValidateMetadataRoundTrip()
@@ -1081,8 +1078,14 @@ namespace TestCilbox
 					["n"] = new Serializee("System.Int32"),
 				}),
 			}));
-			Validator.Set("Meta Legacy Field", $"{(int)legacy.flags}/{legacy.customAttributes.Length}/{(int)legacy.type.flags}");
-			Validator.Validate("Meta Legacy Field", "0/0/0");
+			Validator.Set("Meta Legacy Field", $"{(int)legacy.flags}/{legacy.customAttributes.Length}");
+			Validator.Validate("Meta Legacy Field", "0/0");
+
+			// Only a type's own TypeDef descriptor carries flags; plain references do not.
+			Validator.Set("Meta Reference Has No Flags", ((int)SerializedTypeDescriptorBuilder.FromNativeType(typeof(int)).flags).ToString());
+			Validator.Validate("Meta Reference Has No Flags", "0");
+			Validator.Set("Meta TypeDef Has Flags", (SerializedTypeDescriptorBuilder.FromNativeTypeDef(typeof(int)).flags == typeof(int).Attributes).ToString());
+			Validator.Validate("Meta TypeDef Has Flags", "True");
 
 			SerializedClass sc = new SerializedClass
 			{
@@ -1110,6 +1113,14 @@ namespace TestCilbox
 			SerializedEnum backEnum = SerializedEnum.FromSerializee(se.ToSerializee(), "E");
 			Validator.Set("Meta Enum RoundTrip", $"{backEnum.type.flags}/{backEnum.customAttributes[0].attributeType.typeName}");
 			Validator.Validate("Meta Enum RoundTrip", "Public, Sealed/System.FlagsAttribute");
+
+			// Argument values survive the wire; enums come back as their underlying type.
+			SerializedCustomAttribute usageRow = SerializedCustomAttributeBuilder.FromMember(typeof(AttributeProbeTarget)).Single(a => a.attributeType.typeName == "System.AttributeUsageAttribute");
+			SerializedCustomAttribute usageBack = SerializedCustomAttribute.FromSerializee(usageRow.ToSerializee());
+			Validator.Set("Meta Arg Enum", $"{usageBack.ctorArgs[0].value}:{usageBack.ctorArgs[0].value.GetType().Name}");
+			Validator.Validate("Meta Arg Enum", $"{(int)(AttributeTargets.Class | AttributeTargets.Method)}:Int32");
+			Validator.Set("Meta Arg Named Bool", $"{usageBack.namedArgs.Single(n => n.name == "AllowMultiple").value}");
+			Validator.Validate("Meta Arg Named Bool", "True");
 		}
 
 		private static void ValidateNegativeFieldsObjectIndex()

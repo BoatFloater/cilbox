@@ -1065,6 +1065,9 @@ namespace TestCilbox
 		public CycleChildBehaviour child;
 	}
 
+	[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true)]
+	public class AttributeProbeTarget : Attribute { }
+
 	public class MetadataProbeAttribute : Attribute
 	{
 		public MetadataProbeAttribute( string label, int[] numbers ) { }

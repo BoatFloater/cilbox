@@ -15,7 +15,8 @@ namespace Cilbox
 		public SerializedTypeDescriptor[] genericArgs;
 		// Underlying type (present when underlyingType token written)
 		public SerializedTypeDescriptor underlyingType;
-		// The type's TypeDef flags column (visibility, Serializable, Abstract, ...); written only when nonzero.
+		// The type's TypeDef flags column (visibility, Serializable, Abstract, ...); only set on a class/enum's own "ty" descriptor,
+		// and written only when nonzero.
 		public TypeAttributes flags;
 
 		public bool IsGeneric => genericArgs != null && genericArgs.Length > 0;
@@ -83,10 +84,11 @@ namespace Cilbox
 	public class SerializedAttributeArgument
 	{
 		public SerializedTypeDescriptor type;      // declared argument type
-		public bool isNull;
-		public string text;
+		// null / string / primitive (enums as their underlying type) / object[] for arrays; unused for System.Type.
+		// Stored on the wire in the same representation as proxy fields.
+		public object value;
+		public SerializedTypeDescriptor elementType; // arrays only
 		public SerializedTypeDescriptor typeValue; // value of a System.Type argument
-		public SerializedAttributeArgument[] elements;
 		public string name;                        // named arguments only
 		public bool isField;                       // named arguments only: field (true) or property (false)
 
@@ -99,10 +101,8 @@ namespace Cilbox
 				if( isField ) ret["f"] = new Serializee( "1" );
 			}
 			ret["t"] = type.ToSerializee();
-			if( isNull ) ret["null"] = new Serializee( "1" );
-			else if( typeValue != null ) ret["tv"] = typeValue.ToSerializee();
-			else if( elements != null ) ret["el"] = new Serializee( ToSerializeeArray( elements ) );
-			else ret["v"] = new Serializee( text );
+			if( typeValue != null ) ret["tv"] = typeValue.ToSerializee();
+			else ret["v"] = EncodeValue( value, elementType ).ToSerializee();
 			return new Serializee( ret );
 		}
 
@@ -113,10 +113,16 @@ namespace Cilbox
 			if( m.TryGetValue( "n", out Serializee n ) ) a.name = n.AsString();
 			a.isField = m.ContainsKey( "f" );
 			a.type = SerializedTypeDescriptor.FromSerializee( m["t"] );
-			if( m.ContainsKey( "null" ) ) a.isNull = true;
-			else if( m.TryGetValue( "tv", out Serializee tv ) ) a.typeValue = SerializedTypeDescriptor.FromSerializee( tv );
-			else if( m.TryGetValue( "el", out Serializee el ) ) a.elements = FromSerializeeArray( el );
-			else a.text = m["v"].AsString();
+			if( m.TryGetValue( "tv", out Serializee tv ) )
+			{
+				a.typeValue = SerializedTypeDescriptor.FromSerializee( tv );
+			}
+			else
+			{
+				SerializedProxyField f = SerializedProxyField.FromSerializee( m["v"] );
+				a.value = DecodeValue( f );
+				a.elementType = f.elementType;
+			}
 			return a;
 		}
 
@@ -135,6 +141,52 @@ namespace Cilbox
 			for( int i = 0; i < arr.Length; i++ )
 				ret[i] = FromSerializee( arr[i] );
 			return ret;
+		}
+
+		private static SerializedProxyField EncodeValue( object v, SerializedTypeDescriptor elementType )
+		{
+			SerializedProxyField f = new SerializedProxyField();
+			f.matchingInstanceId = -1;
+			switch( v )
+			{
+				case null:
+					f.fieldType = (byte)ProxyFieldType.Empty;
+					break;
+				case string s:
+					f.fieldType = (byte)ProxyFieldType.String;
+					f.data = s;
+					break;
+				case object[] arr:
+					f.fieldType = (byte)ProxyFieldType.Array;
+					f.elementType = elementType;
+					f.arrayElements = new SerializedProxyField[arr.Length];
+					for( int i = 0; i < arr.Length; i++ )
+						f.arrayElements[i] = EncodeValue( arr[i], null );
+					break;
+				default:
+					if( !StackElement.TypeToStackType.TryGetValue( v.GetType().ToString(), out StackType st ) || st >= StackType.Object )
+						throw new CilboxException( $"Unsupported attribute argument value type {v.GetType()}" );
+					f.fieldType = (byte)ProxyFieldType.Primitive;
+					f.primitiveValue.Unbox( v, st );
+					break;
+			}
+			return f;
+		}
+
+		private static object DecodeValue( SerializedProxyField f )
+		{
+			switch( (ProxyFieldType)f.fieldType )
+			{
+				case ProxyFieldType.Empty:     return null;
+				case ProxyFieldType.String:    return f.data;
+				case ProxyFieldType.Primitive: return f.primitiveValue.Box();
+				case ProxyFieldType.Array:
+					object[] values = new object[f.arrayElements.Length];
+					for( int i = 0; i < values.Length; i++ )
+						values[i] = DecodeValue( f.arrayElements[i] );
+					return values;
+				default: throw new CilboxException( $"Unsupported attribute argument value type {(ProxyFieldType)f.fieldType}" );
+			}
 		}
 	}
 
@@ -756,7 +808,6 @@ namespace Cilbox
 		{
 			var td = new SerializedTypeDescriptor();
 			td.assemblyName = t.Assembly.GetName().Name;
-			td.flags = t.Attributes;
 
 			if (t.IsGenericType)
 			{
@@ -790,6 +841,14 @@ namespace Cilbox
 				if (t.IsEnum && CilboxUtil.HasCilboxableAttribute(t))
 					td.underlyingType = FromNativeType(t.GetEnumUnderlyingType());
 			}
+			return td;
+		}
+
+		// Builds a descriptor for a type's own TypeDef row, which (unlike a plain reference) carries the type flags.
+		public static SerializedTypeDescriptor FromNativeTypeDef(Type t)
+		{
+			var td = FromNativeType(t);
+			td.flags = t.Attributes;
 			return td;
 		}
 	}
@@ -843,6 +902,25 @@ namespace Cilbox
 			se.type = type;
 			se.l = l; // copy full 8 bytes
 			se.o = null; // clear if previously set
+		}
+
+		public object Box()
+		{
+			switch( type )
+			{
+				case StackType.Boolean: return l != 0;
+				case StackType.Sbyte:   return (sbyte)l;
+				case StackType.Byte:    return (byte)e;
+				case StackType.Short:   return (short)l;
+				case StackType.Ushort:  return (ushort)e;
+				case StackType.Int:     return (int)l;
+				case StackType.Uint:    return (uint)e;
+				case StackType.Long:    return l;
+				case StackType.Ulong:   return e;
+				case StackType.Float:   return f;
+				case StackType.Double:  return d;
+				default: throw new CilboxException( $"Unknown primitive StackType {type}" );
+			}
 		}
 	}
 
@@ -1107,19 +1185,39 @@ namespace Cilbox
 
 			SerializedAttributeArgument r = new SerializedAttributeArgument();
 			r.type = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType );
+			if( a.Value is Type t )
+				r.typeValue = SerializedTypeDescriptorBuilder.FromNativeType( t );
+			else
+				r.value = ValueFromTypedArgument( a );
+			if( r.value is object[] )
+				r.elementType = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType.GetElementType() );
+			return r;
+		}
+
+		// Returns null, a string, a boxed primitive (enums as their underlying type) or object[] for arrays.
+		private static object ValueFromTypedArgument( CustomAttributeTypedArgument a )
+		{
+			if( a.Value is CustomAttributeTypedArgument inner )
+				return ValueFromTypedArgument( inner );
+
 			switch( a.Value )
 			{
-			case null: r.isNull = true; break;
-			case Type t: r.typeValue = SerializedTypeDescriptorBuilder.FromNativeType( t ); break;
+			case null:
+			case string:
+				return a.Value;
 			case IReadOnlyCollection<CustomAttributeTypedArgument> elems:
-				r.elements = new SerializedAttributeArgument[elems.Count];
+				object[] values = new object[elems.Count];
 				int n = 0;
 				foreach( CustomAttributeTypedArgument e in elems )
-					r.elements[n++] = FromTypedArgument( e );
-				break;
-			default: r.text = Convert.ToString( a.Value ); break;
+					values[n++] = ValueFromTypedArgument( e );
+				return values;
+			default:
+				object v = a.ArgumentType.IsEnum ? Convert.ChangeType( a.Value, Enum.GetUnderlyingType( a.ArgumentType ) ) : a.Value;
+				if( StackElement.TypeToStackType.TryGetValue( v.GetType().ToString(), out StackType st ) && st < StackType.Object )
+					return v;
+				// Not a StackType primitive (e.g. char, or a System.Type inside an array).
+				return v is Type vt ? vt.FullName : Convert.ToString( v );
 			}
-			return r;
 		}
 	}
 #endif
