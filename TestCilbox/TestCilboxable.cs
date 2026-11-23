@@ -1082,6 +1082,21 @@ namespace TestCilbox
 		public string[] strings = new string[] { "a", "b" };
 		public int[] buildNullArray;
 		public int[,] multi;
+		public CloneProbeBehaviour other;
+		public CloneProbeBehaviour[] others;
+
+		public void Mutate()
+		{
+			number = 42;
+			label = "changed";
+			hidden = 11;
+			nonSerialized = 21;
+			nullString = null;
+			nullArray = null;
+			strings = new string[] { "x", null };
+			other = this;
+			others = new CloneProbeBehaviour[] { this };
+		}
 	}
 
 	public class MetadataProbeAttribute : Attribute
