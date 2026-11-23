@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -14,12 +15,14 @@ namespace Cilbox
 		public SerializedTypeDescriptor[] genericArgs;
 		// Underlying type (present when underlyingType token written)
 		public SerializedTypeDescriptor underlyingType;
+		// The type's TypeDef flags column (visibility, Serializable, Abstract, ...); written only when nonzero.
+		public TypeAttributes flags;
 
 		public bool IsGeneric => genericArgs != null && genericArgs.Length > 0;
 		public bool HasUnderlyingType => underlyingType != null;
 
 		// Mirrors CilboxUtil.GetSerializeeFromNativeType key order: a, then
-		// (n, gn, g) for generics or (n, [ut]) otherwise.
+		// (n, gn, g) for generics or (n, [ut]) otherwise, then the optional tf.
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
@@ -39,6 +42,8 @@ namespace Cilbox
 				if( underlyingType != null )
 					ret["ut"] = underlyingType.ToSerializee();
 			}
+			if( flags != 0 )
+				ret["tf"] = new Serializee( ((int)flags).ToString() );
 			return new Serializee( ret );
 		}
 
@@ -58,6 +63,8 @@ namespace Cilbox
 			}
 			if( m.TryGetValue( "ut", out Serializee ut ) )
 				td.underlyingType = FromSerializee( ut );
+			if( m.TryGetValue( "tf", out Serializee tf ) )
+				td.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
 			return td;
 		}
 
@@ -73,19 +80,136 @@ namespace Cilbox
 		}
 	}
 
+	// One argument of a custom attribute (a constructor argument, or a named field/property argument).
+	// Mirrors CIL's custom attribute blob: values are text for primitives/strings/enums (enums as their underlying
+	// value), a type descriptor for System.Type arguments, or elements for arrays.
+	public class SerializedAttributeArgument
+	{
+		public SerializedTypeDescriptor type;      // declared argument type
+		public bool isNull;
+		public string text;
+		public SerializedTypeDescriptor typeValue; // value of a System.Type argument
+		public SerializedAttributeArgument[] elements;
+		public string name;                        // named arguments only
+		public bool isField;                       // named arguments only: field (true) or property (false)
+
+		public Serializee ToSerializee()
+		{
+			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
+			if( name != null )
+			{
+				ret["n"] = new Serializee( name );
+				if( isField ) ret["f"] = new Serializee( "1" );
+			}
+			ret["t"] = type.ToSerializee();
+			if( isNull ) ret["null"] = new Serializee( "1" );
+			else if( typeValue != null ) ret["tv"] = typeValue.ToSerializee();
+			else if( elements != null ) ret["el"] = new Serializee( ToSerializeeArray( elements ) );
+			else ret["v"] = new Serializee( text );
+			return new Serializee( ret );
+		}
+
+		public static SerializedAttributeArgument FromSerializee( Serializee s )
+		{
+			Dictionary<String, Serializee> m = s.AsMap();
+			SerializedAttributeArgument a = new SerializedAttributeArgument();
+			if( m.TryGetValue( "n", out Serializee n ) ) a.name = n.AsString();
+			a.isField = m.ContainsKey( "f" );
+			a.type = SerializedTypeDescriptor.FromSerializee( m["t"] );
+			if( m.ContainsKey( "null" ) ) a.isNull = true;
+			else if( m.TryGetValue( "tv", out Serializee tv ) ) a.typeValue = SerializedTypeDescriptor.FromSerializee( tv );
+			else if( m.TryGetValue( "el", out Serializee el ) ) a.elements = FromSerializeeArray( el );
+			else a.text = m["v"].AsString();
+			return a;
+		}
+
+		public static Serializee[] ToSerializeeArray( SerializedAttributeArgument[] args )
+		{
+			Serializee[] ret = new Serializee[args.Length];
+			for( int i = 0; i < args.Length; i++ )
+				ret[i] = args[i].ToSerializee();
+			return ret;
+		}
+
+		public static SerializedAttributeArgument[] FromSerializeeArray( Serializee s )
+		{
+			Serializee[] arr = s.AsArray();
+			SerializedAttributeArgument[] ret = new SerializedAttributeArgument[arr.Length];
+			for( int i = 0; i < arr.Length; i++ )
+				ret[i] = FromSerializee( arr[i] );
+			return ret;
+		}
+	}
+
+	// A row of the custom attribute table.  The parent is whichever record (class, field, method) holds the row,
+	// under the optional "ca" key.  Pseudo-attributes (Serializable, NonSerialized, ...) are not rows: like in CIL
+	// they live in the flags of their parent.
+	public class SerializedCustomAttribute
+	{
+		public SerializedTypeDescriptor attributeType;
+		public SerializedAttributeArgument[] ctorArgs = new SerializedAttributeArgument[0];
+		public SerializedAttributeArgument[] namedArgs = new SerializedAttributeArgument[0];
+
+		public Serializee ToSerializee()
+		{
+			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
+			ret["t"] = attributeType.ToSerializee();
+			if( ctorArgs.Length > 0 ) ret["a"] = new Serializee( SerializedAttributeArgument.ToSerializeeArray( ctorArgs ) );
+			if( namedArgs.Length > 0 ) ret["n"] = new Serializee( SerializedAttributeArgument.ToSerializeeArray( namedArgs ) );
+			return new Serializee( ret );
+		}
+
+		public static SerializedCustomAttribute FromSerializee( Serializee s )
+		{
+			Dictionary<String, Serializee> m = s.AsMap();
+			SerializedCustomAttribute ca = new SerializedCustomAttribute();
+			ca.attributeType = SerializedTypeDescriptor.FromSerializee( m["t"] );
+			if( m.TryGetValue( "a", out Serializee a ) ) ca.ctorArgs = SerializedAttributeArgument.FromSerializeeArray( a );
+			if( m.TryGetValue( "n", out Serializee n ) ) ca.namedArgs = SerializedAttributeArgument.FromSerializeeArray( n );
+			return ca;
+		}
+
+		public static Serializee[] ToSerializeeArray( SerializedCustomAttribute[] rows )
+		{
+			Serializee[] ret = new Serializee[rows.Length];
+			for( int i = 0; i < rows.Length; i++ )
+				ret[i] = rows[i].ToSerializee();
+			return ret;
+		}
+
+		public static SerializedCustomAttribute[] FromSerializeeArray( Serializee s )
+		{
+			Serializee[] arr = s.AsArray();
+			SerializedCustomAttribute[] ret = new SerializedCustomAttribute[arr.Length];
+			for( int i = 0; i < arr.Length; i++ )
+				ret[i] = FromSerializee( arr[i] );
+			return ret;
+		}
+	}
+
 	public class SerializedField
 	{
 		public string name;
 		public SerializedTypeDescriptor type;
 
+		// Class fields only: the CIL Field flags column (access, static, initonly, literal, notserialized, ...).
+		public FieldAttributes flags;
+		// Class fields only.
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
+
 		// The same struct is serialized with two different type-key schemes:
 		//  - class fields use "type"
 		//  - method locals / parameters use "dt"
+		// flags and customAttributes are only ever set on class fields, and are only written when set.
 		private Serializee ToSerializeeWithTypeKey( String typeKey )
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
 			ret["name"] = new Serializee( name );
 			ret[typeKey] = type.ToSerializee();
+			if( flags != 0 )
+				ret["ff"] = new Serializee( ((int)flags).ToString() );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -98,6 +222,10 @@ namespace Cilbox
 			SerializedField f = new SerializedField();
 			f.name = m["name"].AsString();
 			f.type = SerializedTypeDescriptor.FromSerializee( m[typeKey] );
+			if( m.TryGetValue( "ff", out Serializee ff ) )
+				f.flags = (FieldAttributes)Int32.Parse( ff.AsString() );
+			if( m.TryGetValue( "ca", out Serializee ca ) )
+				f.customAttributes = SerializedCustomAttribute.FromSerializeeArray( ca );
 			return f;
 		}
 
@@ -159,6 +287,7 @@ namespace Cilbox
 		public SerializedField[] locals;
 		public SerializedField[] parameters;
 		public SerializedExceptionHandler[] exceptionHandlers;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// for legacy serializations, methodName is the enclosing Map key, not part of this map.
 		// Master MethodProps order: body, [eh], locals, parameters, maxStack,
@@ -192,6 +321,8 @@ namespace Cilbox
 			ret["isStatic"] = new Serializee( isStatic ? "1" : "0" );
 			ret["name"] = new Serializee( methodName );
 			ret["fullSignature"] = new Serializee( fullSignature );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -238,6 +369,8 @@ namespace Cilbox
 			sm.isVoid = Int32.Parse( m["isVoid"].AsString() ) != 0;
 			sm.isStatic = Int32.Parse( m["isStatic"].AsString() ) != 0;
 			sm.fullSignature = m["fullSignature"].AsString();
+			if( m.TryGetValue( "ca", out Serializee caSer ) )
+				sm.customAttributes = SerializedCustomAttribute.FromSerializeeArray( caSer );
 			if (m.TryGetValue( "name", out Serializee nameS))
 			{
 				sm.methodName = nameS.AsString();
@@ -253,6 +386,10 @@ namespace Cilbox
 		public SerializedField[] instanceFields;
 		public SerializedMethod[] methods;
 		public string[] baseClassNames;
+		// CIL TypeDef: the class's own descriptor (carries the flags column) and its "Extends" column.
+		public SerializedTypeDescriptor type;
+		public SerializedTypeDescriptor baseType;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// className is the enclosing Map key. Master classProps order:
 		// staticFields, instanceFields, methods (methods is a Map keyed by
@@ -282,6 +419,11 @@ namespace Cilbox
 				bcn.Add(new Serializee(bc));
 			}
 			ret["baseClasses"] = new Serializee(bcn.ToArray());
+
+			if( type != null ) ret["ty"] = type.ToSerializee();
+			if( baseType != null ) ret["bt"] = baseType.ToSerializee();
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 
 			return new Serializee( ret );
 		}
@@ -319,6 +461,11 @@ namespace Cilbox
 			{
 				sc.baseClassNames = new String[0];
 			}
+
+			if( m.TryGetValue( "ty", out Serializee ty ) ) sc.type = SerializedTypeDescriptor.FromSerializee( ty );
+			if( m.TryGetValue( "bt", out Serializee bt ) ) sc.baseType = SerializedTypeDescriptor.FromSerializee( bt );
+			if( m.TryGetValue( "ca", out Serializee caSer ) )
+				sc.customAttributes = SerializedCustomAttribute.FromSerializeeArray( caSer );
 
 			return sc;
 		}
@@ -500,8 +647,10 @@ namespace Cilbox
 	public class SerializedEnum
 	{
 		public string enumName;
+		public SerializedTypeDescriptor type;
 		public SerializedTypeDescriptor underlyingType;
 		public SerializedEnumValue[] values;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// enumName is the enclosing Map key. Master enumProps order: ut, values.
 		public Serializee ToSerializee()
@@ -512,6 +661,10 @@ namespace Cilbox
 			for( int i = 0; i < values.Length; i++ )
 				vals[i] = values[i].ToSerializee();
 			ret["values"] = new Serializee( vals );
+			if( type != null )
+				ret["ty"] = type.ToSerializee();
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -525,6 +678,10 @@ namespace Cilbox
 			e.values = new SerializedEnumValue[vals.Length];
 			for( int i = 0; i < vals.Length; i++ )
 				e.values[i] = SerializedEnumValue.FromSerializee( vals[i] );
+			if( m.TryGetValue( "ty", out Serializee ty ) )
+				e.type = SerializedTypeDescriptor.FromSerializee( ty );
+			if( m.TryGetValue( "ca", out Serializee ca ) )
+				e.customAttributes = SerializedCustomAttribute.FromSerializeeArray( ca );
 			return e;
 		}
 	}
@@ -607,6 +764,7 @@ namespace Cilbox
 		{
 			var td = new SerializedTypeDescriptor();
 			td.assemblyName = t.Assembly.GetName().Name;
+			td.flags = t.Attributes;
 
 			if (t.IsGenericType)
 			{
@@ -900,4 +1058,82 @@ namespace Cilbox
 			return p;
 		}
 	}
+
+#if UNITY_EDITOR
+	/// <summary>
+	/// Builds custom attribute table rows from reflection metadata (CustomAttributeData, so attributes are never instantiated).
+	/// Pseudo-attributes (Serializable, NonSerialized, ...) do not show up here; they are carried by the flags columns.
+	/// </summary>
+	public static class SerializedCustomAttributeBuilder
+	{
+		// Pseudo custom attributes live in metadata flags and side tables (TypeAttributes, FieldAttributes, ParamAttributes,
+		// FieldLayout, FieldMarshal, ImplMap, ...), not in the CustomAttribute table.  Reflection re-synthesizes some of them
+		// as ordinary attributes and offers no way to tell them apart, so they are listed here.  The list is what runtime
+		// reflection implementations are known to synthesize, which is wider than the ECMA-335 II.21.2.1 set (it has
+		// Serializable, NonSerialized, ComImport, PreserveSig, ...).  CoreCLR does not synthesize StructLayout, MethodImpl
+		// or SpecialName; they are listed in case another runtime (e.g. Mono) does.
+		private static readonly HashSet<string> pseudoAttributes = new HashSet<string>
+		{
+			"System.SerializableAttribute", "System.NonSerializedAttribute",
+			"System.Runtime.InteropServices.StructLayoutAttribute", "System.Runtime.InteropServices.FieldOffsetAttribute",
+			"System.Runtime.InteropServices.MarshalAsAttribute", "System.Runtime.InteropServices.DllImportAttribute",
+			"System.Runtime.InteropServices.InAttribute", "System.Runtime.InteropServices.OutAttribute",
+			"System.Runtime.InteropServices.OptionalAttribute", "System.Runtime.InteropServices.PreserveSigAttribute",
+			"System.Runtime.InteropServices.ComImportAttribute",
+			"System.Runtime.CompilerServices.MethodImplAttribute", "System.Runtime.CompilerServices.SpecialNameAttribute",
+		};
+
+		public static SerializedCustomAttribute[] FromMember( MemberInfo member )
+		{
+			List<SerializedCustomAttribute> rows = new List<SerializedCustomAttribute>();
+			foreach( CustomAttributeData d in CustomAttributeData.GetCustomAttributes( member ) )
+			{
+				if( pseudoAttributes.Contains( d.AttributeType.FullName ) )
+					continue;
+
+				SerializedCustomAttribute row = new SerializedCustomAttribute();
+				row.attributeType = SerializedTypeDescriptorBuilder.FromNativeType( d.AttributeType );
+
+				row.ctorArgs = new SerializedAttributeArgument[d.ConstructorArguments.Count];
+				for( int i = 0; i < row.ctorArgs.Length; i++ )
+					row.ctorArgs[i] = FromTypedArgument( d.ConstructorArguments[i] );
+
+				row.namedArgs = new SerializedAttributeArgument[d.NamedArguments.Count];
+				for( int i = 0; i < row.namedArgs.Length; i++ )
+				{
+					CustomAttributeNamedArgument na = d.NamedArguments[i];
+					SerializedAttributeArgument arg = FromTypedArgument( na.TypedValue );
+					arg.name = na.MemberName;
+					arg.isField = na.IsField;
+					row.namedArgs[i] = arg;
+				}
+				rows.Add( row );
+			}
+			return rows.ToArray();
+		}
+
+		private static SerializedAttributeArgument FromTypedArgument( CustomAttributeTypedArgument a )
+		{
+			// An argument declared as object carries its real value as a nested typed argument.
+			if( a.Value is CustomAttributeTypedArgument inner )
+				return FromTypedArgument( inner );
+
+			SerializedAttributeArgument r = new SerializedAttributeArgument();
+			r.type = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType );
+			switch( a.Value )
+			{
+			case null: r.isNull = true; break;
+			case Type t: r.typeValue = SerializedTypeDescriptorBuilder.FromNativeType( t ); break;
+			case IReadOnlyCollection<CustomAttributeTypedArgument> elems:
+				r.elements = new SerializedAttributeArgument[elems.Count];
+				int n = 0;
+				foreach( CustomAttributeTypedArgument e in elems )
+					r.elements[n++] = FromTypedArgument( e );
+				break;
+			default: r.text = Convert.ToString( a.Value ); break;
+			}
+			return r;
+		}
+	}
+#endif
 }
