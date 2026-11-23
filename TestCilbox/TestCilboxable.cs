@@ -1083,9 +1083,7 @@ namespace TestCilbox
 
 	public class MetadataProbeAttribute : Attribute
 	{
-		public string Label;
-		public int[] Numbers;
-		public MetadataProbeAttribute( string label, int[] numbers ) { Label = label; Numbers = numbers; }
+		public MetadataProbeAttribute( string label, int[] numbers ) { }
 		public int Number;
 		public Type Kind { get; set; }
 	}

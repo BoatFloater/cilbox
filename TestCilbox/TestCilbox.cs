@@ -19,7 +19,6 @@ namespace TestCilbox
 		public override long MaxTimeoutLengthUs => 2000000; // 2 seconds.
 
 		static HashSet<String> whiteListType = new HashSet<String>(){
-			"TestCilbox.MetadataProbeAttribute",
 			"Cilbox.CilboxPublicUtils",
 			"TestCilbox.DisposeTester",
 			"TestCilbox.Validator",
@@ -1028,14 +1027,9 @@ namespace TestCilbox
 			Validator.Validate("Meta Probe Ctor String", "on class");
 			Validator.Set("Meta Probe Ctor Array", string.Join(",", ((object[])typeProbe.ConstructorArguments[1]).Select(e => $"{e}:{e.GetType().Name}")));
 			Validator.Validate("Meta Probe Ctor Array", "1:Int32,2:Int32");
-			KeyValuePair<string, object> numberArg = typeProbe.NamedArguments[0];
+			KeyValuePair<string, object> numberArg = typeProbe.NamedArguments.Single();
 			Validator.Set("Meta Probe Named Field", $"{numberArg.Key}={numberArg.Value}:{numberArg.Value.GetType().Name}");
 			Validator.Validate("Meta Probe Named Field", "Number=7:Int32");
-
-			// The real attribute object is built from the serialized arguments.
-			MetadataProbeAttribute typeProbeInstance = cc.GetTypeAttribute<MetadataProbeAttribute>();
-			Validator.Set("Meta Probe Instance", $"{typeProbeInstance?.Label}/{string.Join(",", typeProbeInstance?.Numbers ?? new int[0])}/{typeProbeInstance?.Number}");
-			Validator.Validate("Meta Probe Instance", "on class/1,2/7");
 
 			int serializedPrivate = FieldIndex("serializedPrivate");
 			Validator.Set("Meta SerializeField", cc.HasInstanceFieldAttribute(serializedPrivate, "UnityEngine.SerializeField").ToString());
@@ -1056,9 +1050,8 @@ namespace TestCilbox
 			CilboxCustomAttribute fieldProbe = cc.instanceFieldAttributes[probed].First(a => a.AttributeTypeName == probe);
 			Validator.Set("Meta Field Probe Null Array", (fieldProbe.ConstructorArguments[1] == null).ToString());
 			Validator.Validate("Meta Field Probe Null Array", "True");
-			MetadataProbeAttribute fieldProbeInstance = cc.GetInstanceFieldAttribute<MetadataProbeAttribute>(probed);
-			Validator.Set("Meta Field Probe Instance", $"{fieldProbeInstance?.Label}/{fieldProbeInstance?.Numbers == null}/{fieldProbeInstance?.Kind}");
-			Validator.Validate("Meta Field Probe Instance", "on field/True/System.String");
+			Validator.Set("Meta Field Probe Named Property", $"{string.Join(",", fieldProbe.NamedArguments.Keys)}={(fieldProbe.NamedArguments["Kind"] as Type)?.FullName}");
+			Validator.Validate("Meta Field Probe Named Property", "Kind=System.String");
 
 			Validator.Set("Meta Plain No Attributes", (cc.instanceFieldAttributes[FieldIndex("plain")].Length == 0).ToString());
 			Validator.Validate("Meta Plain No Attributes", "True");
@@ -1069,20 +1062,6 @@ namespace TestCilbox
 			CilboxMethod probeMethod = cc.methods.First(m => m.methodName == "Probe");
 			Validator.Set("Meta Method Probe", probeMethod.HasAttribute(probe).ToString());
 			Validator.Validate("Meta Method Probe", "True");
-			Validator.Set("Meta Method Probe Instance", probeMethod.GetAttribute<MetadataProbeAttribute>()?.Label);
-			Validator.Validate("Meta Method Probe Instance", "on method");
-
-			// An attribute whose type does not exist where the Cilbox is loaded stays matchable by name and never throws.
-			CilboxCustomAttribute[] missing = CilboxCustomAttribute.FromSerialized(cb.usage, new[]
-			{
-				new SerializedCustomAttribute
-				{
-					attributeType = new SerializedTypeDescriptor { assemblyName = "Nowhere", typeName = "Nowhere.MissingAttribute" },
-					ctorArgs = new[] { new SerializedProxyField { fieldType = (byte)ProxyFieldType.Type, elementType = new SerializedTypeDescriptor { assemblyName = "Nowhere", typeName = "Nowhere.MissingType" } } },
-				}
-			});
-			Validator.Set("Meta Missing Type", $"{CilboxCustomAttribute.Has(missing, "Nowhere.MissingAttribute")}/{missing[0].AttributeType == null}/{missing[0].Instantiate() == null}/{CilboxCustomAttribute.Get<Attribute>(missing) == null}");
-			Validator.Validate("Meta Missing Type", "True/True/True/True");
 		}
 
 		private static void ValidateMetadataRoundTrip()
@@ -1132,7 +1111,7 @@ namespace TestCilbox
 			object enumArg = usageBack.ctorArgs[0].primitiveValue.Box();
 			Validator.Set("Meta Arg Enum", $"{enumArg}:{enumArg.GetType().Name}");
 			Validator.Validate("Meta Arg Enum", $"{(int)(AttributeTargets.Class | AttributeTargets.Method)}:Int32");
-			Validator.Set("Meta Arg Named Bool", $"{usageBack.namedArgs.Single(n => n.name == "AllowMultiple").value.primitiveValue.Box()}");
+			Validator.Set("Meta Arg Named Bool", $"{usageBack.namedArgs["AllowMultiple"].primitiveValue.Box()}");
 			Validator.Validate("Meta Arg Named Bool", "True");
 
 			// char is stored as a ushort; Type values and arrays keep their type descriptors.

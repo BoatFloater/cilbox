@@ -43,91 +43,14 @@ namespace Cilbox
 		#nullable restore
 	}
 
-	// A custom attribute row. Matched by name even when its type is unavailable (e.g. it exists in the build project but not
-	// where the Cilbox is loaded); Instantiate() then returns null. Types are resolved through the usage whitelist.
+	// A custom attribute row, matched by type name. The attribute type itself is never resolved, so it does not need to exist
+	// (or be whitelisted) where the Cilbox is loaded.
 	public class CilboxCustomAttribute
 	{
 		public string AttributeTypeName;
-		// Decoded values: null, string, primitive (enums as their underlying type, char as ushort), System.Type
-		// (null if unavailable) or object[] for arrays.
+		// Decoded values: null, string, primitive (enums as their underlying type, char as ushort), System.Type or object[] for arrays.
 		public object[] ConstructorArguments;
-		public KeyValuePair<string, object>[] NamedArguments;
-
-		private Func<Type> resolveAttributeType;
-		private Type attributeType;
-		private bool attributeTypeResolved;
-		private Attribute instance;
-		private bool instantiated;
-
-		public Type AttributeType
-		{
-			get
-			{
-				if( !attributeTypeResolved )
-				{
-					attributeType = resolveAttributeType();
-					attributeTypeResolved = true;
-				}
-				return attributeType;
-			}
-		}
-
-		// Builds the real attribute object, or returns null if its type is unavailable or the arguments do not bind.
-		public Attribute Instantiate()
-		{
-			if( instantiated ) return instance;
-			instantiated = true;
-			Type t = AttributeType;
-			if( t == null ) return null;
-
-			foreach( ConstructorInfo ci in t.GetConstructors( BindingFlags.Public | BindingFlags.Instance ) )
-			{
-				ParameterInfo[] ps = ci.GetParameters();
-				if( ps.Length != ConstructorArguments.Length ) continue;
-				try
-				{
-					object[] args = new object[ps.Length];
-					for( int i = 0; i < args.Length; i++ )
-						args[i] = ConvertArgument( ConstructorArguments[i], ps[i].ParameterType );
-					Attribute a = (Attribute)ci.Invoke( args );
-					foreach( KeyValuePair<string, object> named in NamedArguments )
-					{
-						FieldInfo fi = t.GetField( named.Key, BindingFlags.Public | BindingFlags.Instance );
-						if( fi != null ) { fi.SetValue( a, ConvertArgument( named.Value, fi.FieldType ) ); continue; }
-						PropertyInfo pi = t.GetProperty( named.Key, BindingFlags.Public | BindingFlags.Instance );
-						if( pi == null ) throw new MissingMemberException( t.FullName, named.Key );
-						pi.SetValue( a, ConvertArgument( named.Value, pi.PropertyType ) );
-					}
-					return instance = a;
-				}
-				catch( Exception )
-				{
-					// Try the next overload.
-				}
-			}
-			return null;
-		}
-
-		private static object ConvertArgument( object v, Type target )
-		{
-			if( v == null )
-			{
-				if( target.IsValueType ) throw new InvalidCastException();
-				return null;
-			}
-			if( target.IsInstanceOfType( v ) ) return v;
-			if( target.IsEnum ) return Enum.ToObject( target, v );
-			if( target == typeof(char) && v is ushort u ) return (char)u;
-			if( target.IsArray && v is object[] elements )
-			{
-				Type elementType = target.GetElementType();
-				Array arr = Array.CreateInstance( elementType, elements.Length );
-				for( int i = 0; i < elements.Length; i++ )
-					arr.SetValue( ConvertArgument( elements[i], elementType ), i );
-				return arr;
-			}
-			return Convert.ChangeType( v, target );
-		}
+		public Dictionary<string, object> NamedArguments;
 
 		public static CilboxCustomAttribute[] FromSerialized( CilboxUsage usage, SerializedCustomAttribute[] rows )
 		{
@@ -137,31 +60,19 @@ namespace Cilbox
 				SerializedCustomAttribute row = rows[i];
 				CilboxCustomAttribute ca = new CilboxCustomAttribute();
 				ca.AttributeTypeName = row.attributeType.typeName;
-				SerializedTypeDescriptor typeDescriptor = row.attributeType;
-				ca.resolveAttributeType = () => usage.GetNativeTypeFromDescriptor( typeDescriptor, false );
 				ca.ConstructorArguments = new object[row.ctorArgs.Length];
 				for( int a = 0; a < row.ctorArgs.Length; a++ )
 					ca.ConstructorArguments[a] = row.ctorArgs[a].ToObject( usage );
-				ca.NamedArguments = new KeyValuePair<string, object>[row.namedArgs.Length];
-				for( int a = 0; a < row.namedArgs.Length; a++ )
-					ca.NamedArguments[a] = new KeyValuePair<string, object>( row.namedArgs[a].name, row.namedArgs[a].value.ToObject( usage ) );
+				ca.NamedArguments = new Dictionary<string, object>();
+				foreach( KeyValuePair<string, SerializedProxyField> named in row.namedArgs )
+					ca.NamedArguments[named.Key] = named.Value.ToObject( usage );
 				ret[i] = ca;
 			}
 			return ret;
 		}
 
-		public static bool Has( CilboxCustomAttribute[] rows, string attributeTypeName ) => Array.Exists( rows, a => a.AttributeTypeName == attributeTypeName );
-
-		public static T Get<T>( CilboxCustomAttribute[] rows ) where T : Attribute
-		{
-			foreach( CilboxCustomAttribute ca in rows )
-			{
-				Type t = ca.AttributeType;
-				if( t != null && typeof(T).IsAssignableFrom( t ) && ca.Instantiate() is T found )
-					return found;
-			}
-			return null;
-		}
+		public static CilboxCustomAttribute Find( CilboxCustomAttribute[] rows, string attributeTypeName ) => Array.Find( rows, a => a.AttributeTypeName == attributeTypeName );
+		public static bool Has( CilboxCustomAttribute[] rows, string attributeTypeName ) => Find( rows, attributeTypeName ) != null;
 	}
 
 	public class CilboxHeapInstance
@@ -197,7 +108,6 @@ namespace Cilbox
 #endif
 
 		public bool HasAttribute( string attributeTypeName ) => CilboxCustomAttribute.Has( customAttributes, attributeTypeName );
-		public T GetAttribute<T>() where T : Attribute => CilboxCustomAttribute.Get<T>( customAttributes );
 
 		public void Load( CilboxClass cclass, SerializedMethod sm )
 		{
@@ -2177,20 +2087,15 @@ spiperf.End();
 		public String[] instanceFieldNames;
 		public Type[] instanceFieldTypes;
 
-		// Metadata columns, as in CIL: the TypeDef flags, the base type, and the custom attribute table.
+		// Metadata columns, as in CIL: the TypeDef flags and the custom attribute tables (instance fields only,
+		// indexed like instanceFieldNames).
 		public TypeAttributes typeFlags;
 		public CilboxCustomAttribute[] customAttributes;
-		public FieldAttributes[] staticFieldFlags;
-		public CilboxCustomAttribute[][] staticFieldAttributes;
 		public FieldAttributes[] instanceFieldFlags;
 		public CilboxCustomAttribute[][] instanceFieldAttributes;
 
 		public bool HasTypeAttribute( string attributeTypeName ) => CilboxCustomAttribute.Has( customAttributes, attributeTypeName );
-		public T GetTypeAttribute<T>() where T : Attribute => CilboxCustomAttribute.Get<T>( customAttributes );
 		public bool HasInstanceFieldAttribute( int index, string attributeTypeName ) => CilboxCustomAttribute.Has( instanceFieldAttributes[index], attributeTypeName );
-		public T GetInstanceFieldAttribute<T>( int index ) where T : Attribute => CilboxCustomAttribute.Get<T>( instanceFieldAttributes[index] );
-		public bool HasStaticFieldAttribute( int index, string attributeTypeName ) => CilboxCustomAttribute.Has( staticFieldAttributes[index], attributeTypeName );
-		public T GetStaticFieldAttribute<T>( int index ) where T : Attribute => CilboxCustomAttribute.Get<T>( staticFieldAttributes[index] );
 
 		public Dictionary< String, uint > methodNameToIndex;
 		public Dictionary< String, uint > methodFullSignatureToIndex;
@@ -2223,13 +2128,9 @@ spiperf.End();
 			this.staticFields = new object[sfnum];
 			staticFieldNames = new String[sfnum];
 			staticFieldTypes = new Type[sfnum];
-			staticFieldFlags = new FieldAttributes[sfnum];
-			staticFieldAttributes = new CilboxCustomAttribute[sfnum][];
 			for( int k = 0; k < sfnum; k++ )
 			{
 				staticFieldNames[k] = sc.staticFields[k].name;
-				staticFieldFlags[k] = sc.staticFields[k].flags;
-				staticFieldAttributes[k] = CilboxCustomAttribute.FromSerialized( box.usage, sc.staticFields[k].customAttributes );
 				Type t = staticFieldTypes[k] = box.usage.GetNativeTypeFromDescriptor( sc.staticFields[k].type );
 				this.staticFields[k] = CilboxUtil.DeserializeDataForProxyField( t, "" );
 			}
@@ -2310,7 +2211,6 @@ spiperf.End();
 		public Dictionary<long, string> valueToName;
 
 		public bool HasAttribute( string attributeTypeName ) => CilboxCustomAttribute.Has( customAttributes, attributeTypeName );
-		public T GetAttribute<T>() where T : Attribute => CilboxCustomAttribute.Get<T>( customAttributes );
 
 		public string GetName(long value)
 		{
@@ -3362,8 +3262,11 @@ spiperf.End();
 							SerializedField dictField = new SerializedField();
 							dictField.name = f.Name;
 							dictField.type = SerializedTypeDescriptorBuilder.FromNativeType( f.FieldType );
-							dictField.flags = f.Attributes;
-							dictField.customAttributes = SerializedCustomAttributeBuilder.FromMember( f );
+							if( lst == 1 )
+							{
+								dictField.flags = f.Attributes;
+								dictField.customAttributes = SerializedCustomAttributeBuilder.FromMember( f );
+							}
 							fields.Add( dictField );
 
 							// Fill in our metadata with a class-specific field ID, if this field ID was used in code anywhere.

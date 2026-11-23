@@ -50,13 +50,13 @@ namespace Cilbox
 		public CilboxUsage( Cilbox b ) { box = b; }
 
 		// This is after the type has been fully de-arrayed and de-templated.
-		bool CheckTypeSecurity( Type sType, bool logFailure = true )
+		bool CheckTypeSecurity( Type sType )
 		{
 			// Types defined inside this cilbox are serialized and interpreted locally,
 			// so they should not be forced through the native whitelist.
 			if( box.CheckTypeAllowed( sType ) == true ) return true;
 
-			if( logFailure ) Debug.LogError( $"TYPE FAILED CHECK: {sType}" );
+			Debug.LogError( $"TYPE FAILED CHECK: {sType}" );
 			return false;
 		}
 
@@ -404,10 +404,9 @@ namespace Cilbox
 			return false;
 		}
 
-		// With logMissing false, a type that is absent or not allowed is reported only by returning null.
-		public Type GetNativeTypeFromDescriptor( SerializedTypeDescriptor td, bool logMissing = true )
+		public Type GetNativeTypeFromDescriptor( SerializedTypeDescriptor td )
 		{
-			if( td.HasUnderlyingType ) return GetNativeTypeFromDescriptor( td.underlyingType, logMissing );
+			if( td.HasUnderlyingType ) return GetNativeTypeFromDescriptor( td.underlyingType );
 			String typeName = td.typeName;
 			String assemblyName = td.assemblyName;
 			if( IsCilboxInternalType( typeName ) ) return null;
@@ -428,7 +427,7 @@ namespace Cilbox
 				ga = new Type[td.genericArgs.Length];
 				for( int i = 0; i < td.genericArgs.Length; i++ )
 				{
-					Type gt = GetNativeTypeFromDescriptor( td.genericArgs[i], logMissing );
+					Type gt = GetNativeTypeFromDescriptor( td.genericArgs[i] );
 					if( gt == null ) return null;
 					ga[i] = gt;
 				}
@@ -452,14 +451,14 @@ namespace Cilbox
 
 			if( ret == null )
 			{
-				if( logMissing ) Debug.LogError( $"Could not find type {typeName}" );
+				Debug.LogError( $"Could not find type {typeName}" );
 				return null;
 			}
 
 			if( ga != null )
 				ret = ret.MakeGenericType(ga);
 
-			if( !CheckTypeSecurity( ret, logMissing ) ) return null;
+			if( !CheckTypeSecurity( ret ) ) return null;
 			return ret;
 		}
 

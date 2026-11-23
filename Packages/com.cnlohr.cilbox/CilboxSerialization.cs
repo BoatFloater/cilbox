@@ -74,38 +74,13 @@ namespace Cilbox
 		}
 	}
 
-	// Value of a named argument is a proxy field; the member name is kept separately because an Empty
-	// (null) proxy field does not serialize its fieldName.
-	public class SerializedNamedArgument
-	{
-		public string name;
-		public SerializedProxyField value;
-
-		public Serializee ToSerializee()
-		{
-			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
-			ret["n"] = new Serializee( name );
-			ret["v"] = value.ToSerializee();
-			return new Serializee( ret );
-		}
-
-		public static SerializedNamedArgument FromSerializee( Serializee s )
-		{
-			Dictionary<String, Serializee> m = s.AsMap();
-			SerializedNamedArgument a = new SerializedNamedArgument();
-			a.name = m["n"].AsString();
-			a.value = SerializedProxyField.FromSerializee( m["v"] );
-			return a;
-		}
-	}
-
 	// Argument values use the proxy field representation: null (Empty), string, primitive (enums as their
 	// underlying type, char as ushort), System.Type, and arrays of those.
 	public class SerializedCustomAttribute
 	{
 		public SerializedTypeDescriptor attributeType;
 		public SerializedProxyField[] ctorArgs = new SerializedProxyField[0];
-		public SerializedNamedArgument[] namedArgs = new SerializedNamedArgument[0];
+		public Dictionary<string, SerializedProxyField> namedArgs = new Dictionary<string, SerializedProxyField>();
 
 		public Serializee ToSerializee()
 		{
@@ -118,11 +93,11 @@ namespace Cilbox
 					ca[i] = ctorArgs[i].ToSerializee();
 				ret["a"] = new Serializee( ca );
 			}
-			if( namedArgs.Length > 0 )
+			if( namedArgs.Count > 0 )
 			{
-				Serializee[] na = new Serializee[namedArgs.Length];
-				for( int i = 0; i < na.Length; i++ )
-					na[i] = namedArgs[i].ToSerializee();
+				Dictionary<String, Serializee> na = new Dictionary<String, Serializee>();
+				foreach( KeyValuePair<string, SerializedProxyField> kv in namedArgs )
+					na[kv.Key] = kv.Value.ToSerializee();
 				ret["n"] = new Serializee( na );
 			}
 			return new Serializee( ret );
@@ -141,12 +116,8 @@ namespace Cilbox
 					ca.ctorArgs[i] = SerializedProxyField.FromSerializee( arr[i] );
 			}
 			if( m.TryGetValue( "n", out Serializee n ) )
-			{
-				Serializee[] arr = n.AsArray();
-				ca.namedArgs = new SerializedNamedArgument[arr.Length];
-				for( int i = 0; i < arr.Length; i++ )
-					ca.namedArgs[i] = SerializedNamedArgument.FromSerializee( arr[i] );
-			}
+				foreach( KeyValuePair<String, Serializee> kv in n.AsMap() )
+					ca.namedArgs[kv.Key] = SerializedProxyField.FromSerializee( kv.Value );
 			return ca;
 		}
 
@@ -923,7 +894,7 @@ namespace Cilbox
 				case ProxyFieldType.Empty:     return null;
 				case ProxyFieldType.String:    return data;
 				case ProxyFieldType.Primitive: return primitiveValue.Box();
-				case ProxyFieldType.Type:      return usage.GetNativeTypeFromDescriptor( elementType, false );
+				case ProxyFieldType.Type:      return usage.GetNativeTypeFromDescriptor( elementType );
 				case ProxyFieldType.Array:
 					object[] values = new object[arrayElements.Length];
 					for( int i = 0; i < values.Length; i++ )
@@ -1118,12 +1089,9 @@ namespace Cilbox
 				for( int i = 0; i < row.ctorArgs.Length; i++ )
 					row.ctorArgs[i] = FromTypedArgument( d.ConstructorArguments[i] );
 
-				row.namedArgs = new SerializedNamedArgument[d.NamedArguments.Count];
-				for( int i = 0; i < row.namedArgs.Length; i++ )
-				{
-					CustomAttributeNamedArgument na = d.NamedArguments[i];
-					row.namedArgs[i] = new SerializedNamedArgument { name = na.MemberName, value = FromTypedArgument( na.TypedValue ) };
-				}
+				row.namedArgs = new Dictionary<string, SerializedProxyField>();
+				foreach( CustomAttributeNamedArgument na in d.NamedArguments )
+					row.namedArgs[na.MemberName] = FromTypedArgument( na.TypedValue );
 				rows.Add( row );
 			}
 			return rows.ToArray();
