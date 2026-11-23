@@ -2069,6 +2069,28 @@ spiperf.End();
 		public bool HasTypeAttribute( string attributeTypeName ) => HasAttribute( customAttributes, attributeTypeName );
 		public FieldAttributes GetInstanceFieldFlags( int index ) => instanceFieldRows[index].flags;
 		public bool HasInstanceFieldAttribute( int index, string attributeTypeName ) => HasAttribute( instanceFieldRows[index].customAttributes, attributeTypeName );
+
+		private bool[] instanceFieldSerialized;
+
+		// Whether Unity's serializer would serialize this field: not static/const/readonly/[NonSerialized], public or
+		// [SerializeField], and not a multi-dimensional array.
+		public bool IsInstanceFieldSerialized( int index )
+		{
+			if( instanceFieldSerialized == null )
+			{
+				bool[] serialized = new bool[instanceFieldRows.Length];
+				for( int i = 0; i < serialized.Length; i++ )
+				{
+					FieldAttributes fa = instanceFieldRows[i].flags;
+					if( ( fa & ( FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | FieldAttributes.NotSerialized ) ) != 0 ) continue;
+					if( ( fa & FieldAttributes.FieldAccessMask ) != FieldAttributes.Public && !HasInstanceFieldAttribute( i, "UnityEngine.SerializeField" ) ) continue;
+					if( instanceFieldTypes[i] != null && instanceFieldTypes[i].IsArray && instanceFieldTypes[i].GetArrayRank() > 1 ) continue;
+					serialized[i] = true;
+				}
+				instanceFieldSerialized = serialized;
+			}
+			return instanceFieldSerialized[index];
+		}
 		public FieldAttributes GetStaticFieldFlags( int index ) => staticFieldRows[index].flags;
 		public bool HasStaticFieldAttribute( int index, string attributeTypeName ) => HasAttribute( staticFieldRows[index].customAttributes, attributeTypeName );
 

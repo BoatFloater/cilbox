@@ -1065,6 +1065,25 @@ namespace TestCilbox
 		public CycleChildBehaviour child;
 	}
 
+	[Cilboxable]
+	public enum CloneProbeEnum { A, B }
+
+	[Cilboxable]
+	public class CloneProbeBehaviour : MonoBehaviour
+	{
+		public CloneProbeEnum[] buildNullEnums;
+		public int number = 1;
+		[SerializeField] private string label = "ctor";
+		private int hidden = 10;
+		[NonSerialized] public int nonSerialized = 20;
+		public string nullString = "init";
+		public int[] numbers = new int[] { 1, 2, 3 };
+		public int[] nullArray = new int[] { 9 };
+		public string[] strings = new string[] { "a", "b" };
+		public int[] buildNullArray;
+		public int[,] multi;
+	}
+
 	public class MetadataProbeAttribute : Attribute
 	{
 		public MetadataProbeAttribute( string label, int[] numbers ) { }

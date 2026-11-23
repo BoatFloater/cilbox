@@ -424,6 +424,9 @@ namespace TestCilbox
 			GameObject metadataProbeGo = new GameObject("MetadataProbeToProxy");
 			metadataProbeGo.CreateComponent<MetadataProbeBehaviour>();
 
+			GameObject cloneProbeGo = new GameObject("CloneProbeToProxy");
+			cloneProbeGo.CreateComponent<CloneProbeBehaviour>();
+
 			GameObject secInheritsGo = new GameObject("SecInheritsProhibitedToProxy");
 			SecInheritsProhibited secInherits = secInheritsGo.CreateComponent<SecInheritsProhibited>();
 
@@ -1004,8 +1007,33 @@ namespace TestCilbox
 			Validator.Validate("CustomMethodByName Result", "5");
 
 			ValidateMetadata(cb);
+			ValidateSerializedFields(cb, cloneProbeGo);
 
 			return -1 * Validator.NumValidationErrors();
+		}
+
+		private static void ValidateSerializedFields(Cilbox.Cilbox cb, GameObject sourceGo)
+		{
+			CilboxClass cc = cb.GetClass($"{nameof(TestCilbox)}.{nameof(CloneProbeBehaviour)}");
+			Cilbox.CilboxProxy source = sourceGo.GetComponents<Cilbox.CilboxProxy>()[0];
+			source.RuntimeProxyLoad();
+			int FieldIndex(string name) => Array.IndexOf(cc.instanceFieldNames, name);
+			object Field(string name) => source.fields[FieldIndex(name)].AsObject(source.box);
+
+			// Unity's null normalization: null arrays become empty.
+			Validator.Set("Build Null Array", ((Array)Field("buildNullArray"))?.Length.ToString() ?? "null");
+			Validator.Validate("Build Null Array", "0");
+			Validator.Set("Build Null Enum Array", ((Array)Field("buildNullEnums"))?.Length.ToString() ?? "null");
+			Validator.Validate("Build Null Enum Array", "0");
+
+			// Unity does not serialize multi-dimensional arrays.
+			Validator.Set("Serialized Multi-dimensional Array", cc.IsInstanceFieldSerialized(FieldIndex("multi")).ToString());
+			Validator.Validate("Serialized Multi-dimensional Array", "False");
+
+			CilboxClass probe = cb.GetClass($"{nameof(TestCilbox)}.{nameof(MetadataProbeBehaviour)}");
+			string Serialized(string name) => probe.IsInstanceFieldSerialized(Array.IndexOf(probe.instanceFieldNames, name)).ToString();
+			Validator.Set("Serialized Rule", $"{Serialized("serializedPrivate")}/{Serialized("nonSerializedPublic")}/{Serialized("readonlyPublic")}/{Serialized("probed")}/{Serialized("plain")}");
+			Validator.Validate("Serialized Rule", "True/False/False/True/False");
 		}
 
 		private static void ValidateMetadata(Cilbox.Cilbox cb)

@@ -59,11 +59,6 @@ namespace Cilbox
 			foreach( var f in fi )
 			{
 				// TODO: Consider if we should try serializing _everything_.  No because arrays really need their constructors.
-				if( !f.IsPublic && f.GetCustomAttributes(typeof(SerializeField), true).Length <= 0 )
-					continue;
-
-				object fv = f.GetValue( mToSteal );
-
 				int matchingInstanceNameID = -1;
 				for( int k = 0; k < cls.instanceFieldNames.Length; k++ )
 				{
@@ -80,7 +75,12 @@ namespace Cilbox
 					continue;
 				}
 
-				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, ref refToProxyMap);
+				// Only what Unity itself would serialize.
+				if( !cls.IsInstanceFieldSerialized( matchingInstanceNameID ) )
+					continue;
+
+				object fv = f.GetValue( mToSteal );
+				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, cls.instanceFieldRows[matchingInstanceNameID].type, refToProxyMap);
 
 				// Serialize no matter what.
 				lstFields.Add( spf );
@@ -95,17 +95,49 @@ namespace Cilbox
 			buildTimeGuid = Guid.NewGuid().ToString();
 		}
 
+		// An array type's descriptor names "T[]" and does not describe T.  Cilbox classes and enums have their own
+		// descriptor (with flags, and the underlying type for enums); other element types are only needed by name.
+		private SerializedTypeDescriptor GetDeclaredElementType( SerializedTypeDescriptor arrayType )
+		{
+			string elementName = arrayType.typeName.Substring( 0, arrayType.typeName.Length - 2 );
+			if( box.GetClass( elementName ) is CilboxClass elementClass && elementClass.type != null )
+				return elementClass.type;
+			if( box.cilboxEnums != null && box.cilboxEnums.TryGetValue( elementName, out CilboxEnum elementEnum ) && elementEnum.type != null )
+				return elementEnum.type;
+			return new SerializedTypeDescriptor { assemblyName = arrayType.assemblyName, typeName = elementName };
+		}
 
-		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, ref Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
+		// declaredType is the declared type of the field (or of the array's element, when recursing).  Like Unity's
+		// serializer, null strings become "" and null arrays become empty.
+		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, SerializedTypeDescriptor declaredType, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
 		{
 			SerializedProxyField spf = new SerializedProxyField();
 			spf.fieldName = fName;
 			spf.matchingInstanceId = matchingInstanceNameID;
 
-			// Skip null objects.
+			String declaredName = declaredType?.typeName;
+			bool declaredArray = declaredName != null && declaredName.EndsWith( "[]" );
+			SerializedTypeDescriptor declaredElementType = null;
+			if( declaredArray )
+				declaredElementType = GetDeclaredElementType( declaredType );
+
 			if( fv == null )
 			{
-				spf.fieldType = (byte)ProxyFieldType.Empty;
+				if( declaredName == "System.String" )
+				{
+					spf.fieldType = (byte)ProxyFieldType.String;
+					spf.data = "";
+				}
+				else if( declaredArray )
+				{
+					spf.fieldType = (byte)ProxyFieldType.Array;
+					spf.elementType = declaredElementType;
+					spf.arrayElements = new SerializedProxyField[0];
+				}
+				else
+				{
+					spf.fieldType = (byte)ProxyFieldType.Empty;
+				}
 				return spf;
 			}
 
@@ -160,10 +192,7 @@ namespace Cilbox
 				int len = arr.Length;
 				spf.arrayElements = new SerializedProxyField[len];
 				for( int i = 0; i < len; i++ )
-				{
-					object o = arr.GetValue(i);
-					spf.arrayElements[i] = SerializeProxyField( o, null, -1, ref refToProxyMap );
-				}
+					spf.arrayElements[i] = SerializeProxyField( arr.GetValue(i), null, -1, declaredElementType, refToProxyMap );
 			}
 			else
 			{
@@ -176,6 +205,7 @@ namespace Cilbox
 		}
 
 #endif
+
 		void Awake()
 		{
 			// You cannot do anything in Awake()  Box is not set yet.
@@ -262,9 +292,9 @@ namespace Cilbox
 				SerializedProxyField[] matchingProxyField = new SerializedProxyField[fieldCount];
 				foreach( SerializedProxyField spf in proxyData.fields )
 				{
-					// Go over the root objects, to see which ones slot in and how.
-					if( (ProxyFieldType)spf.fieldType != ProxyFieldType.Empty &&
-						spf.matchingInstanceId >= 0 &&
+					// Go over the root objects, to see which ones slot in and how.  Empty ones are kept: a
+					// serialized null replaces the constructor's value, as in Unity.
+					if( spf.matchingInstanceId >= 0 &&
 						spf.matchingInstanceId < matchingProxyField.Length )
 					{
 						matchingProxyField[spf.matchingInstanceId] = spf;
