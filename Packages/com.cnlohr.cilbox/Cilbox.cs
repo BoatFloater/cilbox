@@ -2098,6 +2098,11 @@ spiperf.End();
 		public bool HasTypeAttribute( string attributeTypeName ) => CilboxCustomAttribute.Has( customAttributes, attributeTypeName );
 		public bool HasInstanceFieldAttribute( int index, string attributeTypeName ) => CilboxCustomAttribute.Has( instanceFieldAttributes[index], attributeTypeName );
 
+		// Whether Unity's serializer would serialize each instance field: not static/const/readonly/[NonSerialized], public or
+		// [SerializeField], and not a multi-dimensional array.
+		public bool[] instanceFieldSerialized;
+		public bool IsInstanceFieldSerialized( int index ) => instanceFieldSerialized[index];
+
 		public Dictionary< String, uint > methodNameToIndex;
 		public Dictionary< String, uint > methodFullSignatureToIndex;
 
@@ -2142,6 +2147,7 @@ spiperf.End();
 			instanceFieldTypeNames = new String[ifnum];
 			instanceFieldFlags = new FieldAttributes[ifnum];
 			instanceFieldAttributes = new CilboxCustomAttribute[ifnum][];
+			instanceFieldSerialized = new bool[ifnum];
 			for( int k = 0; k < ifnum; k++ )
 			{
 				instanceFieldNames[k] = sc.instanceFields[k].name;
@@ -2149,6 +2155,12 @@ spiperf.End();
 				instanceFieldAttributes[k] = CilboxCustomAttribute.FromSerialized( box.usage, sc.instanceFields[k].customAttributes );
 				instanceFieldTypes[k] = box.usage.GetNativeTypeFromDescriptor( sc.instanceFields[k].type );
 				instanceFieldTypeNames[k] = sc.instanceFields[k].type.typeName;
+
+				FieldAttributes fa = instanceFieldFlags[k];
+				instanceFieldSerialized[k] =
+					( fa & ( FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | FieldAttributes.NotSerialized ) ) == 0 &&
+					( ( fa & FieldAttributes.FieldAccessMask ) == FieldAttributes.Public || HasInstanceFieldAttribute( k, "UnityEngine.SerializeField" ) ) &&
+					!instanceFieldTypeNames[k].EndsWith( ",]" ); // Multi-dimensional array; named so it works for Cilbox types too.
 			}
 
 			int mnum = sc.methods.Length;

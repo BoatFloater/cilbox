@@ -904,22 +904,23 @@ namespace Cilbox
 			}
 		}
 
-		// Mirrors CilboxProxy.SerializeThing. Empty fields emit ONLY {empty:"true"}.
+		// Mirrors CilboxProxy.SerializeThing. Empty fields emit {n, miid, empty:"true"}; the name and
+		// index let a null serialized field be told apart from a field that was never serialized.
 		// Otherwise: [n], [miid], then type-specific keys in master's exact order.
 		public Serializee ToSerializee()
 		{
 			Dictionary<String, Serializee> f = new Dictionary<String, Serializee>();
+
+			if( fieldName != null )
+				f["n"] = new Serializee( fieldName );
+			if( matchingInstanceId >= 0 )
+				f["miid"] = new Serializee( matchingInstanceId.ToString() );
 
 			if( (ProxyFieldType)fieldType == ProxyFieldType.Empty )
 			{
 				f["empty"] = new Serializee( "true" );
 				return new Serializee( f );
 			}
-
-			if( fieldName != null )
-				f["n"] = new Serializee( fieldName );
-			if( matchingInstanceId >= 0 )
-				f["miid"] = new Serializee( matchingInstanceId.ToString() );
 
 			switch( (ProxyFieldType)fieldType )
 			{
@@ -969,16 +970,16 @@ namespace Cilbox
 			SerializedProxyField f = new SerializedProxyField();
 			f.matchingInstanceId = -1;
 
+			if( m.TryGetValue( "n", out Serializee nS ) )
+				f.fieldName = nS.AsString();
+			if( m.TryGetValue( "miid", out Serializee miidS ) )
+				f.matchingInstanceId = Int32.Parse( miidS.AsString() );
+
 			if( m.ContainsKey( "empty" ) )
 			{
 				f.fieldType = (byte)ProxyFieldType.Empty;
 				return f;
 			}
-
-			if( m.TryGetValue( "n", out Serializee nS ) )
-				f.fieldName = nS.AsString();
-			if( m.TryGetValue( "miid", out Serializee miidS ) )
-				f.matchingInstanceId = Int32.Parse( miidS.AsString() );
 
 			String t = m["t"].AsString();
 			if( t == "s" )
