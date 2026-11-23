@@ -1065,6 +1065,24 @@ namespace TestCilbox
 		public CycleChildBehaviour child;
 	}
 
+	[Cilboxable, Serializable]
+	public class CloneProbePlain
+	{
+		public int number = 1;
+		public string text = "default";
+		public string unset;
+		[NonSerialized] public int hidden = 5;
+	}
+
+	[Cilboxable, Serializable]
+	public class CloneProbeSelf { public int n = 1; public CloneProbeSelf next; }
+
+	[Cilboxable, Serializable]
+	public class CloneProbeNodeA { public CloneProbeNodeB b; }
+
+	[Cilboxable, Serializable]
+	public class CloneProbeNodeB { public CloneProbeNodeA a; }
+
 	[Cilboxable]
 	public enum CloneProbeEnum { A, B }
 
@@ -1080,8 +1098,22 @@ namespace TestCilbox
 		public int[] numbers = new int[] { 1, 2, 3 };
 		public int[] nullArray = new int[] { 9 };
 		public string[] strings = new string[] { "a", "b" };
+		public CloneProbePlain plain = new CloneProbePlain { number = 3, text = "built", hidden = 9 };
+		public CloneProbePlain nullPlain = new CloneProbePlain();
 		public int[] buildNullArray;
 		public int[,] multi;
+		public CloneProbePlain buildNullPlain;
+		public CloneProbeSelf selfNull;
+		public CloneProbeNodeA cycleNull;
+
+		// Referencing the classes in code is what gets them exported with the Cilbox.
+		public void Touch()
+		{
+			new CloneProbeSelf();
+			new CloneProbeNodeA();
+			new CloneProbeNodeB();
+		}
+		public CloneProbePlain[] plainArray;
 		public CloneProbeBehaviour other;
 		public CloneProbeBehaviour[] others;
 
@@ -1094,6 +1126,13 @@ namespace TestCilbox
 			nullString = null;
 			nullArray = null;
 			strings = new string[] { "x", null };
+			plain.number = 7;
+			plain.text = "p";
+			plain.hidden = 6;
+			nullPlain = null;
+			plainArray = new CloneProbePlain[2];
+			plainArray[0] = new CloneProbePlain();
+			plainArray[0].number = 99;
 			other = this;
 			others = new CloneProbeBehaviour[] { this };
 		}

@@ -156,9 +156,10 @@ namespace Cilbox
 
 		}
 
-		public object Interpret( CilboxProxy ths, object [] parametersIn )
+		public object Interpret( object ths, object [] parametersIn )
 		{
-			if( ths != null && ths.disabled ) return null;
+			CilboxProxy thisProxy = ths as CilboxProxy;
+			if( thisProxy != null && thisProxy.disabled ) return null;
 
 			int plen = parametersIn?.Length ?? 0;
 			int thisOffset = isStatic ? 0 : 1;
@@ -193,7 +194,7 @@ namespace Cilbox
 			catch( Exception e )
 			{
 				parentClass.box.InterpreterExit();
-				if( ths != null ) ths.DisableProxy();
+				if( thisProxy != null ) thisProxy.DisableProxy();
 				else parentClass.box.DisableWithReason(e.ToString());
 				if( e is CilboxUnhandledInterpretedException uhe && uhe.Throwee is System.Exception te ) throw te;
 				throw;
@@ -410,7 +411,7 @@ spiperf.Begin();
 
 								if( ctorAsNewObj )
 								{
-									CilboxHeapInstance newObj = CreateDefaultInternalObject( targetClass );
+									CilboxHeapInstance newObj = targetClass.CreateDefaultInstance();
 									stackBuffer[nextParameterStart].LoadObject( newObj );
 									try
 									{
@@ -1805,7 +1806,7 @@ spiperf.End();
 				{
 					if( !box.classes.TryGetValue( typeMeta.Name, out int classId ) )
 						throw new CilboxInterpreterRuntimeException($"Could not find internal type for initobj: {typeMeta.Name}", parentClass.className, methodName, pc);
-					return CreateDefaultInternalObject( box.classesList[classId] );
+					return box.classesList[classId].CreateDefaultInstance();
 				}
 
 				if( typeMeta.nativeType != null )
@@ -1823,47 +1824,6 @@ spiperf.End();
 				}
 
 				return null;
-			}
-
-			CilboxHeapInstance CreateDefaultInternalObject( CilboxClass cls )
-			{
-				CilboxHeapInstance newObj = new CilboxHeapInstance();
-				newObj.className = cls.className;
-				newObj.cls = cls;
-				newObj.fields = new StackElement[cls.instanceFieldNames.Length];
-
-				for( int i = 0; i < cls.instanceFieldNames.Length; i++ )
-				{
-					Type fieldType = cls.instanceFieldTypes[i];
-					if( fieldType == null )
-					{
-						newObj.fields[i].LoadObject( null );
-						continue;
-					}
-
-					StackType fieldStackType = StackElement.StackTypeFromType( fieldType );
-					if( fieldStackType < StackType.Object )
-					{
-						newObj.fields[i].type = fieldStackType;
-					}
-					else if( fieldType.IsValueType )
-					{
-						try
-						{
-							newObj.fields[i].LoadObject( Activator.CreateInstance( fieldType ) );
-						}
-						catch
-						{
-							newObj.fields[i].LoadObject( null );
-						}
-					}
-					else
-					{
-						newObj.fields[i].LoadObject( null );
-					}
-				}
-
-				return newObj;
 			}
 
 			void interpretedThrow(int currentInstruction, object thrownObj)
@@ -2070,10 +2030,32 @@ spiperf.End();
 		public FieldAttributes GetInstanceFieldFlags( int index ) => instanceFieldRows[index].flags;
 		public bool HasInstanceFieldAttribute( int index, string attributeTypeName ) => HasAttribute( instanceFieldRows[index].customAttributes, attributeTypeName );
 
+		// A class that is not a UnityEngine.Object (nor another native type): its instances are CilboxHeapInstances.
+		public bool IsPlainClass()
+		{
+			CilboxClass c = this;
+			while( c.baseType != null )
+			{
+				if( c.baseType.typeName == "System.Object" ) return true;
+				c = box.GetClass( c.baseType.typeName );
+				if( c == null ) return false;
+			}
+			return false;
+		}
+
+		// The plain Cilbox class a field is declared as (or an array of), or null.
+		public CilboxClass GetPlainFieldClass( int index )
+		{
+			String typeName = instanceFieldRows[index].type.typeName;
+			if( typeName.EndsWith( "[]" ) ) typeName = typeName.Substring( 0, typeName.Length - 2 );
+			CilboxClass c = box.GetClass( typeName );
+			return c != null && c.IsPlainClass() ? c : null;
+		}
+
 		private bool[] instanceFieldSerialized;
 
 		// Whether Unity's serializer would serialize this field: not static/const/readonly/[NonSerialized], public or
-		// [SerializeField], and not a multi-dimensional array.
+		// [SerializeField], and not a multi-dimensional array; the type of a plain class field must also be [Serializable].
 		public bool IsInstanceFieldSerialized( int index )
 		{
 			if( instanceFieldSerialized == null )
@@ -2085,11 +2067,53 @@ spiperf.End();
 					if( ( fa & ( FieldAttributes.Static | FieldAttributes.Literal | FieldAttributes.InitOnly | FieldAttributes.NotSerialized ) ) != 0 ) continue;
 					if( ( fa & FieldAttributes.FieldAccessMask ) != FieldAttributes.Public && !HasInstanceFieldAttribute( i, "UnityEngine.SerializeField" ) ) continue;
 					if( instanceFieldTypes[i] != null && instanceFieldTypes[i].IsArray && instanceFieldTypes[i].GetArrayRank() > 1 ) continue;
-					serialized[i] = true;
+					CilboxClass plain = GetPlainFieldClass( i );
+					serialized[i] = plain == null || ( plain.typeFlags & TypeAttributes.Serializable ) != 0;
 				}
 				instanceFieldSerialized = serialized;
 			}
 			return instanceFieldSerialized[index];
+		}
+
+		public CilboxHeapInstance CreateDefaultInstance()
+		{
+			CilboxHeapInstance newObj = new CilboxHeapInstance();
+			newObj.className = className;
+			newObj.cls = this;
+			newObj.fields = new StackElement[instanceFieldNames.Length];
+
+			for( int i = 0; i < instanceFieldNames.Length; i++ )
+			{
+				Type fieldType = instanceFieldTypes[i];
+				if( fieldType == null )
+				{
+					newObj.fields[i].LoadObject( null );
+					continue;
+				}
+
+				StackType fieldStackType = StackElement.StackTypeFromType( fieldType );
+				if( fieldStackType < StackType.Object )
+				{
+					newObj.fields[i].type = fieldStackType;
+				}
+				else if( fieldType.IsValueType )
+				{
+					try
+					{
+						newObj.fields[i].LoadObject( Activator.CreateInstance( fieldType ) );
+					}
+					catch
+					{
+						newObj.fields[i].LoadObject( null );
+					}
+				}
+				else
+				{
+					newObj.fields[i].LoadObject( null );
+				}
+			}
+
+			return newObj;
 		}
 		public FieldAttributes GetStaticFieldFlags( int index ) => staticFieldRows[index].flags;
 		public bool HasStaticFieldAttribute( int index, string attributeTypeName ) => HasAttribute( staticFieldRows[index].customAttributes, attributeTypeName );
@@ -2175,11 +2199,11 @@ spiperf.End();
 		/// <param name="importId"></param>
 		/// <param name="parameters"></param>
 		/// <returns></returns>
-		public object InterpretMethod(CilboxProxy proxy, ImportFunctionID importId, object [] parameters)
+		public object InterpretMethod(object ths, ImportFunctionID importId, object [] parameters)
 		{
 			uint index = importFunctionToId[(int)importId];
 			if( index == 0xffffffff ) return null;
-			return methods[index].Interpret(proxy, parameters);
+			return methods[index].Interpret(ths, parameters);
 		}
 
 		/// <summary>
@@ -2190,11 +2214,11 @@ spiperf.End();
 		/// <param name="methodName"></param>
 		/// <param name="parameters"></param>
 		/// <returns></returns>
-		public object InterpretMethod(CilboxProxy proxy, string methodName, object[] parameters)
+		public object InterpretMethod(object ths, string methodName, object[] parameters)
 		{
 			uint index = methodNameToIndex[methodName];
 			if( index == 0xffffffff ) return null;
-			return methods[index].Interpret(proxy, parameters);
+			return methods[index].Interpret(ths, parameters);
 		}
 	}
 

@@ -811,6 +811,7 @@ namespace Cilbox
 		ObjectRef   = 4,  // "obj" — UnityEngine.Object reference
 		Array       = 5,  // "a"
 		Json        = 6,  // "j" — JsonUtility-serialized struct
+		CilboxHeap  = 7,  // "h" — instance of a plain Cilbox class; data = class name, arrayElements = serialized fields
 	}
 
 	// Primitive-only value payload. 16 bytes (no object slot). NOTE: keep the
@@ -969,6 +970,14 @@ namespace Cilbox
 					f["d"] = new Serializee( data );
 					f["at"] = elementType.ToSerializee();
 					break;
+				case ProxyFieldType.CilboxHeap:
+					f["t"] = new Serializee( "h" );
+					f["d"] = new Serializee( data );
+					Serializee[] hd = new Serializee[arrayElements.Length];
+					for( int i = 0; i < arrayElements.Length; i++ )
+						hd[i] = arrayElements[i].ToSerializee();
+					f["ad"] = new Serializee( hd );
+					break;
 			}
 			return new Serializee( f );
 		}
@@ -1024,6 +1033,15 @@ namespace Cilbox
 				f.fieldType = (byte)ProxyFieldType.Json;
 				f.data = m["d"].AsString();
 				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
+			}
+			else if( t == "h" )
+			{
+				f.fieldType = (byte)ProxyFieldType.CilboxHeap;
+				f.data = m["d"].AsString();
+				Serializee[] hd = m["ad"].AsArray();
+				f.arrayElements = new SerializedProxyField[hd.Length];
+				for( int i = 0; i < hd.Length; i++ )
+					f.arrayElements[i] = FromSerializee( hd[i] );
 			}
 			else if( t.Length > 0 && t[0] == 'e' )
 			{

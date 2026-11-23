@@ -1032,6 +1032,7 @@ namespace TestCilbox
 
 			object Field(string name) => clone.fields[FieldIndex(name)].AsObject(clone.box);
 			string Strings(object arr) => string.Join("|", ((Array)arr).Cast<object>().Select(o => o?.ToString() ?? "null"));
+			object PlainField(object plain, string name) => ((CilboxHeapInstance)plain).fields[Array.IndexOf(((CilboxHeapInstance)plain).cls.instanceFieldNames, name)].AsObject(clone.box);
 
 			Validator.Set("Clone Public Field", Field("number").ToString());
 			Validator.Validate("Clone Public Field", "42");
@@ -1049,6 +1050,14 @@ namespace TestCilbox
 			Validator.Validate("Clone Null Array", "");
 			Validator.Set("Clone String Array", Strings(Field("strings")));
 			Validator.Validate("Clone String Array", "x|");
+			Validator.Set("Clone Plain Class", $"{PlainField(Field("plain"), "number")}/{PlainField(Field("plain"), "text")}/{PlainField(Field("plain"), "hidden")}");
+			Validator.Validate("Clone Plain Class", "7/p/5");
+			// A fresh instance runs the constructor, then Unity's null normalization applies inside it as well.
+			Validator.Set("Clone Null Plain Class", $"{PlainField(Field("nullPlain"), "number")}/{PlainField(Field("nullPlain"), "text")}/{PlainField(Field("nullPlain"), "unset") ?? "null"}");
+			Validator.Validate("Clone Null Plain Class", "1/default/");
+			object plainArray = Field("plainArray");
+			Validator.Set("Clone Plain Array", $"{((Array)plainArray).Length}/{PlainField(((Array)plainArray).GetValue(0), "number")}/{PlainField(((Array)plainArray).GetValue(1), "number")}");
+			Validator.Validate("Clone Plain Array", "2/99/1");
 			Validator.Set("Clone Remapped Reference", ReferenceEquals(Field("other"), clone).ToString());
 			Validator.Validate("Clone Remapped Reference", "True");
 			Validator.Set("Clone Remapped Array Reference", ReferenceEquals(((Array)Field("others")).GetValue(0), clone).ToString());
@@ -1069,8 +1078,9 @@ namespace TestCilbox
 			source.RuntimeProxyLoad();
 			int FieldIndex(string name) => Array.IndexOf(cc.instanceFieldNames, name);
 			object Field(string name) => source.fields[FieldIndex(name)].AsObject(source.box);
+			object PlainField(object plain, string name) => ((CilboxHeapInstance)plain).fields[Array.IndexOf(((CilboxHeapInstance)plain).cls.instanceFieldNames, name)].AsObject(source.box);
 
-			// Unity's null normalization: null arrays become empty.
+			// Unity's null normalization: null arrays become empty, null plain classes become a fresh instance.
 			Validator.Set("Build Null Array", ((Array)Field("buildNullArray"))?.Length.ToString() ?? "null");
 			Validator.Validate("Build Null Array", "0");
 			Validator.Set("Build Null Enum Array", ((Array)Field("buildNullEnums"))?.Length.ToString() ?? "null");
@@ -1079,6 +1089,29 @@ namespace TestCilbox
 			// Unity does not serialize multi-dimensional arrays.
 			Validator.Set("Serialized Multi-dimensional Array", cc.IsInstanceFieldSerialized(FieldIndex("multi")).ToString());
 			Validator.Validate("Serialized Multi-dimensional Array", "False");
+
+			Validator.Set("Build Null Plain Class", $"{PlainField(Field("buildNullPlain"), "number")}/{PlainField(Field("buildNullPlain"), "unset") ?? "null"}");
+			Validator.Validate("Build Null Plain Class", "1/");
+
+			// A null field of the class's own type stays null; an indirect cycle is cut off after 11 nested instances.
+			int ChainLength(object node)
+			{
+				int n = 0;
+				while( node is CilboxHeapInstance heapNode )
+				{
+					n++;
+					node = heapNode.fields.Select(f => f.AsObject(source.box)).FirstOrDefault(o => o is CilboxHeapInstance);
+				}
+				return n;
+			}
+			Validator.Set("Build Self Reference Chain", ChainLength(Field("selfNull")).ToString());
+			Validator.Validate("Build Self Reference Chain", "1");
+			Validator.Set("Build Cycle Chain", ChainLength(Field("cycleNull")).ToString());
+			Validator.Validate("Build Cycle Chain", "11");
+
+			// A plain class instance is copied field by field; its [NonSerialized] field keeps the constructor value.
+			Validator.Set("Build Plain Class", $"{PlainField(Field("plain"), "number")}/{PlainField(Field("plain"), "text")}/{PlainField(Field("plain"), "hidden")}");
+			Validator.Validate("Build Plain Class", "3/built/5");
 
 			CilboxClass probe = cb.GetClass($"{nameof(TestCilbox)}.{nameof(MetadataProbeBehaviour)}");
 			string Serialized(string name) => probe.IsInstanceFieldSerialized(Array.IndexOf(probe.instanceFieldNames, name)).ToString();

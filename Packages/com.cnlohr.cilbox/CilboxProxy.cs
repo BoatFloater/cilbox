@@ -25,6 +25,7 @@ namespace Cilbox
 
 		private bool proxyWasSetup = false;
 		private bool proxyLoadInProgress = false;
+		private int heapLoadDepth = 0;
 
 		public bool disabled = false;
 
@@ -95,17 +96,45 @@ namespace Cilbox
 			buildTimeGuid = Guid.NewGuid().ToString();
 		}
 
+		// At build time an instance of a plain Cilbox class is still the native object: serialize it like a CilboxHeapInstance.
+		private void SerializeNativePlainObject( SerializedProxyField spf, object fv, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap, int depth )
+		{
+			Type type = fv.GetType();
+			CilboxClass plainClass = box.GetClass( type.FullName );
+			if( plainClass == null || depth > MaxSerializeDepth )
+			{
+				spf.fieldType = (byte)ProxyFieldType.Empty;
+				return;
+			}
+
+			spf.fieldType = (byte)ProxyFieldType.CilboxHeap;
+			spf.data = type.FullName;
+			List< SerializedProxyField > lstFields = new List< SerializedProxyField >();
+			foreach( FieldInfo f in CilboxUtil.GetInstanceFieldsBaseFirst( type ) )
+			{
+				int index = Array.IndexOf( plainClass.instanceFieldNames, f.Name );
+				if( index < 0 || !plainClass.IsInstanceFieldSerialized( index ) )
+					continue;
+				lstFields.Add( SerializeProxyField( f.GetValue( fv ), f.Name, index, plainClass.instanceFieldRows[index].type, refToProxyMap, depth + 1, plainClass.className ) );
+			}
+			spf.arrayElements = lstFields.ToArray();
+		}
+
 #endif
 
+		// Nesting of plain classes that gets serialized, matching Unity: a chain of nested instances is cut off after
+		// 11 (the field's own instance plus 10 levels).
+		private const int MaxSerializeDepth = 10;
+
 		// Serializes the Unity-serialized instance fields of a class instance.
-		private SerializedProxyField[] SerializeInstanceFields( CilboxClass instanceClass, StackElement[] values )
+		private SerializedProxyField[] SerializeInstanceFields( CilboxClass instanceClass, StackElement[] values, int depth )
 		{
 			List< SerializedProxyField > lstFields = new List< SerializedProxyField >();
 			for( int i = 0; i < values.Length; i++ )
 			{
 				if( !instanceClass.IsInstanceFieldSerialized( i ) )
 					continue;
-				lstFields.Add( SerializeProxyField( values[i].AsObject( box ), instanceClass.instanceFieldNames[i], i, instanceClass.instanceFieldRows[i].type, null ) );
+				lstFields.Add( SerializeProxyField( values[i].AsObject( box ), instanceClass.instanceFieldNames[i], i, instanceClass.instanceFieldRows[i].type, null, depth, instanceClass.className ) );
 			}
 			return lstFields.ToArray();
 		}
@@ -123,8 +152,9 @@ namespace Cilbox
 		}
 
 		// declaredType is the declared type of the field (or of the array's element, when recursing).  Like Unity's
-		// serializer, null strings become "" and null arrays become empty.
-		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, SerializedTypeDescriptor declaredType, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
+		// serializer, null strings become "", null arrays become empty, and null plain classes become a fresh
+		// instance (except in a field of the class's own type: ownerClassName is the class that declares the field).
+		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, SerializedTypeDescriptor declaredType, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap, int depth = 0, string ownerClassName = null )
 		{
 			SerializedProxyField spf = new SerializedProxyField();
 			spf.fieldName = fName;
@@ -149,6 +179,12 @@ namespace Cilbox
 					spf.elementType = declaredElementType;
 					spf.arrayElements = new SerializedProxyField[0];
 				}
+				else if( declaredName != null && declaredName != ownerClassName && box.GetClass( declaredName )?.IsPlainClass() == true )
+				{
+					spf.fieldType = (byte)ProxyFieldType.CilboxHeap;
+					spf.data = declaredName;
+					spf.arrayElements = new SerializedProxyField[0];
+				}
 				else
 				{
 					spf.fieldType = (byte)ProxyFieldType.Empty;
@@ -171,11 +207,24 @@ namespace Cilbox
 					spf.primitiveValue.Unbox( underlying, st );
 				}
 			}
-			// Instances of plain Cilbox classes are not serialized; they read back as null.
-			else if( fv is CilboxHeapInstance )
+			// An instance of a plain Cilbox class created at runtime.
+			else if( fv is CilboxHeapInstance heap )
 			{
-				spf.fieldType = (byte)ProxyFieldType.Empty;
+				if( depth > MaxSerializeDepth )
+				{
+					spf.fieldType = (byte)ProxyFieldType.Empty;
+					return spf;
+				}
+				spf.fieldType = (byte)ProxyFieldType.CilboxHeap;
+				spf.data = heap.className;
+				spf.arrayElements = SerializeInstanceFields( heap.cls, heap.fields, depth + 1 );
 			}
+#if UNITY_EDITOR
+			else if( hasCilboxable && !( fv is MonoBehaviour ) )
+			{
+				SerializeNativePlainObject( spf, fv, refToProxyMap, depth );
+			}
+#endif
 			// Not a proxiable script.  (At runtime there is no map, and references to proxies are UnityEngine.Objects.)
 			else if (hasCilboxable && refToProxyMap != null)
 			{
@@ -214,7 +263,7 @@ namespace Cilbox
 				int len = arr.Length;
 				spf.arrayElements = new SerializedProxyField[len];
 				for( int i = 0; i < len; i++ )
-					spf.arrayElements[i] = SerializeProxyField( arr.GetValue(i), null, -1, declaredElementType, refToProxyMap );
+					spf.arrayElements[i] = SerializeProxyField( arr.GetValue(i), null, -1, declaredElementType, refToProxyMap, depth, ownerClassName );
 			}
 			else
 			{
@@ -237,7 +286,7 @@ namespace Cilbox
 			fieldsObjects = new List< UnityEngine.Object >();
 			serializedObjectData = new SerializedProxy
 			{
-				fields = SerializeInstanceFields( cls, fields ),
+				fields = SerializeInstanceFields( cls, fields, 0 ),
 			}.SerializeString();
 		}
 
@@ -467,6 +516,50 @@ namespace Cilbox
 				break;
 			}
 
+			case ProxyFieldType.CilboxHeap:
+			{
+				CilboxClass heapClass = box.GetClass( spf.data );
+				if( heapClass == null )
+				{
+					Debug.LogWarning( $"[CilboxProxy:{gameObject.name}] Unknown class {spf.data} for field {rootFieldName}." );
+					break;
+				}
+
+				// Like Unity: construct the object, then overwrite its serialized fields.
+				CilboxHeapInstance heap = heapClass.CreateDefaultInstance();
+				heapClass.InterpretMethod( heap, ImportFunctionID.dotCtor, null );
+				foreach( SerializedProxyField child in spf.arrayElements )
+				{
+					int index = child.matchingInstanceId;
+					if( index < 0 || index >= heap.fields.Length )
+						continue;
+					LoadProxyFieldStackElement( child, ref heap.fields[index], rootFieldName + "." + heapClass.instanceFieldNames[index] );
+				}
+
+				// Unity's null normalization also applies to what is still null after construction (a fresh instance has no
+				// serialized fields to load): empty strings, arrays and lists, and fresh instances of plain classes.
+				if( heapLoadDepth < MaxSerializeDepth )
+				{
+					heapLoadDepth++;
+					try
+					{
+						for( int index = 0; index < heap.fields.Length; index++ )
+						{
+							if( !heapClass.IsInstanceFieldSerialized( index ) || heap.fields[index].type != StackType.Object || heap.fields[index].o != null )
+								continue;
+							SerializedProxyField normalized = SerializeProxyField( null, heapClass.instanceFieldNames[index], index, heapClass.instanceFieldRows[index].type, null, 0, heapClass.className );
+							LoadProxyFieldStackElement( normalized, ref heap.fields[index], rootFieldName + "." + heapClass.instanceFieldNames[index] );
+						}
+					}
+					finally
+					{
+						heapLoadDepth--;
+					}
+				}
+				refElement.LoadObject( heap );
+				return;
+			}
+
 			case ProxyFieldType.Array:
 			{
 				Type t = box.usage.GetNativeTypeFromDescriptor( spf.elementType );
@@ -479,6 +572,10 @@ namespace Cilbox
 						// Check the array to see if it is Cilboxed
 						t = typeof(CilboxProxy);
 						isCilboxElementType = true;
+
+						// Arrays of plain Cilbox classes hold CilboxHeapInstances, which a CilboxProxy[] cannot.
+						if( Array.Exists( spf.arrayElements, e => (ProxyFieldType)e.fieldType == ProxyFieldType.CilboxHeap ) )
+							t = typeof(object);
 					}
 					else // type is null and not a Cilbox class
 					{
