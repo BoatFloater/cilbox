@@ -1008,8 +1008,58 @@ namespace TestCilbox
 
 			ValidateMetadata(cb);
 			ValidateSerializedFields(cb, cloneProbeGo);
+			ValidateInstantiate(cb, cloneProbeGo);
 
 			return -1 * Validator.NumValidationErrors();
+		}
+
+		// Stands in for Object.Instantiate: Unity serializes the source, then deserializes into the clone and remaps references into the copied hierarchy.
+		private static void ValidateInstantiate(Cilbox.Cilbox cb, GameObject sourceGo)
+		{
+			CilboxClass cc = cb.GetClass($"{nameof(TestCilbox)}.{nameof(CloneProbeBehaviour)}");
+			Cilbox.CilboxProxy source = sourceGo.GetComponents<Cilbox.CilboxProxy>()[0];
+			int FieldIndex(string name) => Array.IndexOf(cc.instanceFieldNames, name);
+			cc.InterpretMethod(source, "Mutate", new object[0]);
+			source.OnBeforeSerialize();
+
+			GameObject cloneGo = new GameObject("CloneProbeClone");
+			Cilbox.CilboxProxy clone = cloneGo.AddComponent<Cilbox.CilboxProxy>();
+			clone.box = source.box;
+			clone.className = source.className;
+			clone.serializedObjectData = source.serializedObjectData;
+			clone.fieldsObjects = source.fieldsObjects.ConvertAll(o => o == source ? clone : o);
+			clone.RuntimeProxyLoad();
+
+			object Field(string name) => clone.fields[FieldIndex(name)].AsObject(clone.box);
+			string Strings(object arr) => string.Join("|", ((Array)arr).Cast<object>().Select(o => o?.ToString() ?? "null"));
+
+			Validator.Set("Clone Public Field", Field("number").ToString());
+			Validator.Validate("Clone Public Field", "42");
+			Validator.Set("Clone SerializeField", Field("label").ToString());
+			Validator.Validate("Clone SerializeField", "changed");
+			Validator.Set("Clone Private Field Reset", Field("hidden").ToString());
+			Validator.Validate("Clone Private Field Reset", "10");
+			Validator.Set("Clone NonSerialized Field Reset", Field("nonSerialized").ToString());
+			Validator.Validate("Clone NonSerialized Field Reset", "20");
+			Validator.Set("Clone Null String", Field("nullString").ToString());
+			Validator.Validate("Clone Null String", "");
+			Validator.Set("Clone Array", Strings(Field("numbers")));
+			Validator.Validate("Clone Array", "1|2|3");
+			Validator.Set("Clone Null Array", Strings(Field("nullArray")));
+			Validator.Validate("Clone Null Array", "");
+			Validator.Set("Clone String Array", Strings(Field("strings")));
+			Validator.Validate("Clone String Array", "x|");
+			Validator.Set("Clone Remapped Reference", ReferenceEquals(Field("other"), clone).ToString());
+			Validator.Validate("Clone Remapped Reference", "True");
+			Validator.Set("Clone Remapped Array Reference", ReferenceEquals(((Array)Field("others")).GetValue(0), clone).ToString());
+			Validator.Validate("Clone Remapped Array Reference", "True");
+
+			// A proxy that has not loaded keeps its setup payload.
+			Cilbox.CilboxProxy unloaded = new Cilbox.CilboxProxy();
+			unloaded.serializedObjectData = "payload";
+			unloaded.OnBeforeSerialize();
+			Validator.Set("Unloaded Proxy Payload Kept", unloaded.serializedObjectData);
+			Validator.Validate("Unloaded Proxy Payload Kept", "payload");
 		}
 
 		private static void ValidateSerializedFields(Cilbox.Cilbox cb, GameObject sourceGo)

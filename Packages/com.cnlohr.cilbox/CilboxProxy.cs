@@ -9,7 +9,7 @@ using Unity.Profiling;
 
 namespace Cilbox
 {
-	public class CilboxProxy : MonoBehaviour
+	public class CilboxProxy : MonoBehaviour, ISerializationCallbackReceiver
 	{
 		public StackElement [] fields;
 		public List< UnityEngine.Object > fieldsObjects;  // This is generally only held during saving and loading, not in use.
@@ -80,7 +80,7 @@ namespace Cilbox
 					continue;
 
 				object fv = f.GetValue( mToSteal );
-				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, f.FieldType, refToProxyMap);
+				SerializedProxyField spf = SerializeProxyField(fv, f.Name, matchingInstanceNameID, cls.instanceFieldTypes[matchingInstanceNameID], cls.instanceFieldTypeNames[matchingInstanceNameID], refToProxyMap);
 
 				// Serialize no matter what.
 				lstFields.Add( spf );
@@ -95,27 +95,45 @@ namespace Cilbox
 			buildTimeGuid = Guid.NewGuid().ToString();
 		}
 
-		// declaredType is the declared type of the field (or of the array's element, when recursing).  Like Unity's
-		// serializer, null strings become "" and null arrays become empty.
-		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, Type declaredType, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
+#endif
+
+		// Serializes the Unity-serialized instance fields of a class instance.
+		private SerializedProxyField[] SerializeInstanceFields( CilboxClass instanceClass, StackElement[] values )
+		{
+			List< SerializedProxyField > lstFields = new List< SerializedProxyField >();
+			for( int i = 0; i < values.Length; i++ )
+			{
+				if( !instanceClass.IsInstanceFieldSerialized( i ) )
+					continue;
+				lstFields.Add( SerializeProxyField( values[i].AsObject( box ), instanceClass.instanceFieldNames[i], i, instanceClass.instanceFieldTypes[i], instanceClass.instanceFieldTypeNames[i], null ) );
+			}
+			return lstFields.ToArray();
+		}
+
+		// declaredType and declaredName describe the declared type of the field (or of the array's element, when recursing);
+		// declaredType is null for Cilbox classes and enums.  Like Unity's serializer, null strings become "" and null arrays
+		// become empty.
+		private SerializedProxyField SerializeProxyField( object fv, String fName, int matchingInstanceNameID, Type declaredType, String declaredName, Dictionary< MonoBehaviour, CilboxProxy > refToProxyMap )
 		{
 			SerializedProxyField spf = new SerializedProxyField();
 			spf.fieldName = fName;
 			spf.matchingInstanceId = matchingInstanceNameID;
 
-			Type declaredElementType = declaredType != null && declaredType.IsArray ? declaredType.GetElementType() : null;
+			bool declaredArray = declaredName != null && declaredName.EndsWith( "[]" );
+			string declaredElementName = declaredArray ? declaredName.Substring( 0, declaredName.Length - 2 ) : null;
+			Type declaredElementType = declaredArray ? declaredType?.GetElementType() : null;
 
 			if( fv == null )
 			{
-				if( declaredType == typeof(string) )
+				if( declaredName == "System.String" )
 				{
 					spf.fieldType = (byte)ProxyFieldType.String;
 					spf.data = "";
 				}
-				else if( declaredElementType != null )
+				else if( declaredArray )
 				{
 					spf.fieldType = (byte)ProxyFieldType.Array;
-					spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( declaredElementType );
+					spf.elementType = box.usage.GetDescriptorForDeclaredType( declaredElementType, declaredElementName );
 					spf.arrayElements = new SerializedProxyField[0];
 				}
 				else
@@ -140,8 +158,13 @@ namespace Cilbox
 					spf.primitiveValue.Unbox( underlying, st );
 				}
 			}
-			// Not a proxiable script.
-			else if (hasCilboxable)
+			// Instances of plain Cilbox classes are not serialized; they read back as null.
+			else if( fv is CilboxHeapInstance )
+			{
+				spf.fieldType = (byte)ProxyFieldType.Empty;
+			}
+			// Not a proxiable script.  (At runtime there is no map, and references to proxies are UnityEngine.Objects.)
+			else if (hasCilboxable && refToProxyMap != null)
 			{
 				spf.fieldType = (byte)ProxyFieldType.CilboxRef;
 				spf.fieldObjectIndex = fieldsObjects.Count;
@@ -171,12 +194,14 @@ namespace Cilbox
 			{
 				spf.fieldType = (byte)ProxyFieldType.Array;
 				Type type = fvType.GetElementType();
-				spf.elementType = SerializedTypeDescriptorBuilder.FromNativeType( type );
+				// Arrays of Cilbox classes are object[] (or CilboxProxy[]) at runtime; only the declared type names the class.
+				bool useDeclared = declaredArray && ( type == typeof(object) || type == typeof(CilboxProxy) );
+				spf.elementType = useDeclared ? box.usage.GetDescriptorForDeclaredType( declaredElementType, declaredElementName ) : SerializedTypeDescriptorBuilder.FromNativeType( type );
 				Array arr = (Array)fv;
 				int len = arr.Length;
 				spf.arrayElements = new SerializedProxyField[len];
 				for( int i = 0; i < len; i++ )
-					spf.arrayElements[i] = SerializeProxyField( arr.GetValue(i), null, -1, declaredElementType, refToProxyMap );
+					spf.arrayElements[i] = SerializeProxyField( arr.GetValue(i), null, -1, declaredElementType, declaredElementName, refToProxyMap );
 			}
 			else
 			{
@@ -188,7 +213,22 @@ namespace Cilbox
 			return spf;
 		}
 
-#endif
+		// Unity serializes the live object when it is cloned (Object.Instantiate).  Re-serialize the current field
+		// values into the same payload SetupProxy produces, and the clone loads them through RuntimeProxyLoad().
+		public void OnBeforeSerialize()
+		{
+			// Not loaded yet: the payload from setup is still the current state.
+			if( !proxyWasSetup )
+				return;
+
+			fieldsObjects = new List< UnityEngine.Object >();
+			serializedObjectData = new SerializedProxy
+			{
+				fields = SerializeInstanceFields( cls, fields ),
+			}.SerializeString();
+		}
+
+		public void OnAfterDeserialize() { }
 
 		void Awake()
 		{

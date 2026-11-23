@@ -404,6 +404,18 @@ namespace Cilbox
 			return false;
 		}
 
+		// The inverse of GetNativeTypeFromDescriptor for a declared type: a native Type is described as usual.  Cilbox classes
+		// and enums have no native Type, so they are described by name (and the underlying type, for enums).
+		public SerializedTypeDescriptor GetDescriptorForDeclaredType( Type nativeType, String typeName )
+		{
+			if( nativeType != null )
+				return SerializedTypeDescriptorBuilder.FromNativeType( nativeType );
+			SerializedTypeDescriptor td = new SerializedTypeDescriptor { assemblyName = "", typeName = typeName };
+			if( box.cilboxEnums != null && box.cilboxEnums.TryGetValue( typeName, out CilboxEnum cilboxEnum ) )
+				td.underlyingType = SerializedTypeDescriptorBuilder.FromNativeType( StackElement.TypeFromStackType[(int)cilboxEnum.underlyingType] );
+			return td;
+		}
+
 		public Type GetNativeTypeFromDescriptor( SerializedTypeDescriptor td )
 		{
 			if( td.HasUnderlyingType ) return GetNativeTypeFromDescriptor( td.underlyingType );

@@ -338,6 +338,12 @@ namespace UnityEngine
 
 	// We don't _really_ do serialization.
 
+	public interface ISerializationCallbackReceiver
+	{
+		void OnBeforeSerialize();
+		void OnAfterDeserialize();
+	}
+
 	[AttributeUsage(AttributeTargets.Field, AllowMultiple = false)]
 	public class SerializeField : Attribute { }
 }
