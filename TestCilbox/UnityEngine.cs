@@ -146,11 +146,6 @@ namespace UnityEngine
 		}
 	}
 
-	public class SerializeField
-	{
-	};
-
-
 	public class MonoBehaviour : Behaviour
 	{
 		public MonoBehaviour() { }
@@ -344,7 +339,7 @@ namespace UnityEngine
 	// We don't _really_ do serialization.
 
 	[AttributeUsage(AttributeTargets.Field, AllowMultiple = false)]
-	public class SerializeFieldAttribute : Attribute { }
+	public class SerializeField : Attribute { }
 }
 
 namespace UnityEngine.Serialization

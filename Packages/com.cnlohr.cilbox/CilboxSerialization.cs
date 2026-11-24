@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 
@@ -73,19 +74,93 @@ namespace Cilbox
 		}
 	}
 
+	// Argument values use the proxy field representation: null (Empty), string, primitive (enums as their
+	// underlying type, char as ushort), System.Type, and arrays of those.
+	public class SerializedCustomAttribute
+	{
+		public SerializedTypeDescriptor attributeType;
+		public SerializedProxyField[] ctorArgs = new SerializedProxyField[0];
+		public Dictionary<string, SerializedProxyField> namedArgs = new Dictionary<string, SerializedProxyField>();
+
+		public Serializee ToSerializee()
+		{
+			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
+			ret["t"] = attributeType.ToSerializee();
+			if( ctorArgs.Length > 0 )
+			{
+				Serializee[] ca = new Serializee[ctorArgs.Length];
+				for( int i = 0; i < ca.Length; i++ )
+					ca[i] = ctorArgs[i].ToSerializee();
+				ret["a"] = new Serializee( ca );
+			}
+			if( namedArgs.Count > 0 )
+			{
+				Dictionary<String, Serializee> na = new Dictionary<String, Serializee>();
+				foreach( KeyValuePair<string, SerializedProxyField> kv in namedArgs )
+					na[kv.Key] = kv.Value.ToSerializee();
+				ret["n"] = new Serializee( na );
+			}
+			return new Serializee( ret );
+		}
+
+		public static SerializedCustomAttribute FromSerializee( Serializee s )
+		{
+			Dictionary<String, Serializee> m = s.AsMap();
+			SerializedCustomAttribute ca = new SerializedCustomAttribute();
+			ca.attributeType = SerializedTypeDescriptor.FromSerializee( m["t"] );
+			if( m.TryGetValue( "a", out Serializee a ) )
+			{
+				Serializee[] arr = a.AsArray();
+				ca.ctorArgs = new SerializedProxyField[arr.Length];
+				for( int i = 0; i < arr.Length; i++ )
+					ca.ctorArgs[i] = SerializedProxyField.FromSerializee( arr[i] );
+			}
+			if( m.TryGetValue( "n", out Serializee n ) )
+				foreach( KeyValuePair<String, Serializee> kv in n.AsMap() )
+					ca.namedArgs[kv.Key] = SerializedProxyField.FromSerializee( kv.Value );
+			return ca;
+		}
+
+		public static Serializee[] ToSerializeeArray( SerializedCustomAttribute[] rows )
+		{
+			Serializee[] ret = new Serializee[rows.Length];
+			for( int i = 0; i < rows.Length; i++ )
+				ret[i] = rows[i].ToSerializee();
+			return ret;
+		}
+
+		public static SerializedCustomAttribute[] FromSerializeeArray( Serializee s )
+		{
+			Serializee[] arr = s.AsArray();
+			SerializedCustomAttribute[] ret = new SerializedCustomAttribute[arr.Length];
+			for( int i = 0; i < arr.Length; i++ )
+				ret[i] = FromSerializee( arr[i] );
+			return ret;
+		}
+	}
+
 	public class SerializedField
 	{
 		public string name;
 		public SerializedTypeDescriptor type;
 
+		// Class fields only:
+		public FieldAttributes flags;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
+
 		// The same struct is serialized with two different type-key schemes:
 		//  - class fields use "type"
 		//  - method locals / parameters use "dt"
+		// flags and customAttributes are only ever set on class fields, and are only written when set.
 		private Serializee ToSerializeeWithTypeKey( String typeKey )
 		{
 			Dictionary<String, Serializee> ret = new Dictionary<String, Serializee>();
 			ret["name"] = new Serializee( name );
 			ret[typeKey] = type.ToSerializee();
+			if( flags != 0 )
+				ret["ff"] = new Serializee( ((int)flags).ToString() );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -98,6 +173,10 @@ namespace Cilbox
 			SerializedField f = new SerializedField();
 			f.name = m["name"].AsString();
 			f.type = SerializedTypeDescriptor.FromSerializee( m[typeKey] );
+			if( m.TryGetValue( "ff", out Serializee ff ) )
+				f.flags = (FieldAttributes)Int32.Parse( ff.AsString() );
+			if( m.TryGetValue( "ca", out Serializee ca ) )
+				f.customAttributes = SerializedCustomAttribute.FromSerializeeArray( ca );
 			return f;
 		}
 
@@ -159,6 +238,7 @@ namespace Cilbox
 		public SerializedField[] locals;
 		public SerializedField[] parameters;
 		public SerializedExceptionHandler[] exceptionHandlers;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// for legacy serializations, methodName is the enclosing Map key, not part of this map.
 		// Master MethodProps order: body, [eh], locals, parameters, maxStack,
@@ -192,6 +272,8 @@ namespace Cilbox
 			ret["isStatic"] = new Serializee( isStatic ? "1" : "0" );
 			ret["name"] = new Serializee( methodName );
 			ret["fullSignature"] = new Serializee( fullSignature );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -238,6 +320,8 @@ namespace Cilbox
 			sm.isVoid = Int32.Parse( m["isVoid"].AsString() ) != 0;
 			sm.isStatic = Int32.Parse( m["isStatic"].AsString() ) != 0;
 			sm.fullSignature = m["fullSignature"].AsString();
+			if( m.TryGetValue( "ca", out Serializee caSer ) )
+				sm.customAttributes = SerializedCustomAttribute.FromSerializeeArray( caSer );
 			if (m.TryGetValue( "name", out Serializee nameS))
 			{
 				sm.methodName = nameS.AsString();
@@ -253,6 +337,8 @@ namespace Cilbox
 		public SerializedField[] instanceFields;
 		public SerializedMethod[] methods;
 		public string[] baseClassNames;
+		public TypeAttributes flags;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// className is the enclosing Map key. Master classProps order:
 		// staticFields, instanceFields, methods (methods is a Map keyed by
@@ -282,6 +368,11 @@ namespace Cilbox
 				bcn.Add(new Serializee(bc));
 			}
 			ret["baseClasses"] = new Serializee(bcn.ToArray());
+
+			if( flags != 0 )
+				ret["tf"] = new Serializee( ((int)flags).ToString() );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 
 			return new Serializee( ret );
 		}
@@ -319,6 +410,11 @@ namespace Cilbox
 			{
 				sc.baseClassNames = new String[0];
 			}
+
+			if( m.TryGetValue( "tf", out Serializee tf ) )
+				sc.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
+			if( m.TryGetValue( "ca", out Serializee caSer ) )
+				sc.customAttributes = SerializedCustomAttribute.FromSerializeeArray( caSer );
 
 			return sc;
 		}
@@ -500,8 +596,10 @@ namespace Cilbox
 	public class SerializedEnum
 	{
 		public string enumName;
+		public TypeAttributes flags;
 		public SerializedTypeDescriptor underlyingType;
 		public SerializedEnumValue[] values;
+		public SerializedCustomAttribute[] customAttributes = new SerializedCustomAttribute[0];
 
 		// enumName is the enclosing Map key. Master enumProps order: ut, values.
 		public Serializee ToSerializee()
@@ -512,6 +610,10 @@ namespace Cilbox
 			for( int i = 0; i < values.Length; i++ )
 				vals[i] = values[i].ToSerializee();
 			ret["values"] = new Serializee( vals );
+			if( flags != 0 )
+				ret["tf"] = new Serializee( ((int)flags).ToString() );
+			if( customAttributes.Length > 0 )
+				ret["ca"] = new Serializee( SerializedCustomAttribute.ToSerializeeArray( customAttributes ) );
 			return new Serializee( ret );
 		}
 
@@ -525,6 +627,10 @@ namespace Cilbox
 			e.values = new SerializedEnumValue[vals.Length];
 			for( int i = 0; i < vals.Length; i++ )
 				e.values[i] = SerializedEnumValue.FromSerializee( vals[i] );
+			if( m.TryGetValue( "tf", out Serializee tf ) )
+				e.flags = (TypeAttributes)Int32.Parse( tf.AsString() );
+			if( m.TryGetValue( "ca", out Serializee ca ) )
+				e.customAttributes = SerializedCustomAttribute.FromSerializeeArray( ca );
 			return e;
 		}
 	}
@@ -653,6 +759,7 @@ namespace Cilbox
 		ObjectRef   = 4,  // "obj" — UnityEngine.Object reference
 		Array       = 5,  // "a"
 		Json        = 6,  // "j" — JsonUtility-serialized struct
+		Type        = 7,  // "ty" — System.Type value, the type is in elementType
 	}
 
 	// Primitive-only value payload. 16 bytes (no object slot). NOTE: keep the
@@ -693,6 +800,25 @@ namespace Cilbox
 			se.type = type;
 			se.l = l; // copy full 8 bytes
 			se.o = null; // clear if previously set
+		}
+
+		public object Box()
+		{
+			switch( type )
+			{
+				case StackType.Boolean: return l != 0;
+				case StackType.Sbyte:   return (sbyte)l;
+				case StackType.Byte:    return (byte)e;
+				case StackType.Short:   return (short)l;
+				case StackType.Ushort:  return (ushort)e;
+				case StackType.Int:     return (int)l;
+				case StackType.Uint:    return (uint)e;
+				case StackType.Long:    return l;
+				case StackType.Ulong:   return e;
+				case StackType.Float:   return f;
+				case StackType.Double:  return d;
+				default: throw new CilboxException( $"Unknown primitive StackType {type}" );
+			}
 		}
 	}
 
@@ -759,6 +885,25 @@ namespace Cilbox
 			return v;
 		}
 
+		// Decodes the kinds that can be a custom attribute argument: null, string, primitive, System.Type (null if the type
+		// is unavailable) and arrays of those as object[].
+		public object ToObject( CilboxUsage usage )
+		{
+			switch( (ProxyFieldType)fieldType )
+			{
+				case ProxyFieldType.Empty:     return null;
+				case ProxyFieldType.String:    return data;
+				case ProxyFieldType.Primitive: return primitiveValue.Box();
+				case ProxyFieldType.Type:      return usage.GetNativeTypeFromDescriptor( elementType );
+				case ProxyFieldType.Array:
+					object[] values = new object[arrayElements.Length];
+					for( int i = 0; i < values.Length; i++ )
+						values[i] = arrayElements[i].ToObject( usage );
+					return values;
+				default: throw new CilboxException( $"Unsupported value type {(ProxyFieldType)fieldType}" );
+			}
+		}
+
 		// Mirrors CilboxProxy.SerializeThing. Empty fields emit ONLY {empty:"true"}.
 		// Otherwise: [n], [miid], then type-specific keys in master's exact order.
 		public Serializee ToSerializee()
@@ -808,6 +953,10 @@ namespace Cilbox
 				case ProxyFieldType.Json:
 					f["t"] = new Serializee( "j" );
 					f["d"] = new Serializee( data );
+					f["at"] = elementType.ToSerializee();
+					break;
+				case ProxyFieldType.Type:
+					f["t"] = new Serializee( "ty" );
 					f["at"] = elementType.ToSerializee();
 					break;
 			}
@@ -866,6 +1015,11 @@ namespace Cilbox
 				f.data = m["d"].AsString();
 				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
 			}
+			else if( t == "ty" )
+			{
+				f.fieldType = (byte)ProxyFieldType.Type;
+				f.elementType = SerializedTypeDescriptor.FromSerializee( m["at"] );
+			}
 			else if( t.Length > 0 && t[0] == 'e' )
 			{
 				f.fieldType = (byte)ProxyFieldType.Primitive;
@@ -900,4 +1054,88 @@ namespace Cilbox
 			return p;
 		}
 	}
+
+#if UNITY_EDITOR
+	/// <summary>
+	/// Builds custom attribute table rows from reflection metadata (CustomAttributeData, so attributes are never instantiated).
+	/// </summary>
+	public static class SerializedCustomAttributeBuilder
+	{
+		// Filter out "pseudo-custom attributes" which should not be in the CustomAttribute table but are added to the list
+		// by reflection.
+		private static readonly HashSet<string> pseudoAttributes = new HashSet<string>
+		{
+			"System.SerializableAttribute", "System.NonSerializedAttribute",
+			"System.Runtime.InteropServices.StructLayoutAttribute", "System.Runtime.InteropServices.FieldOffsetAttribute",
+			"System.Runtime.InteropServices.MarshalAsAttribute", "System.Runtime.InteropServices.DllImportAttribute",
+			"System.Runtime.InteropServices.InAttribute", "System.Runtime.InteropServices.OutAttribute",
+			"System.Runtime.InteropServices.OptionalAttribute", "System.Runtime.InteropServices.PreserveSigAttribute",
+			"System.Runtime.InteropServices.ComImportAttribute",
+			"System.Runtime.CompilerServices.MethodImplAttribute", "System.Runtime.CompilerServices.SpecialNameAttribute",
+		};
+
+		public static SerializedCustomAttribute[] FromMember( MemberInfo member )
+		{
+			List<SerializedCustomAttribute> rows = new List<SerializedCustomAttribute>();
+			foreach( CustomAttributeData d in CustomAttributeData.GetCustomAttributes( member ) )
+			{
+				if( pseudoAttributes.Contains( d.AttributeType.FullName ) )
+					continue;
+
+				SerializedCustomAttribute row = new SerializedCustomAttribute();
+				row.attributeType = SerializedTypeDescriptorBuilder.FromNativeType( d.AttributeType );
+
+				row.ctorArgs = new SerializedProxyField[d.ConstructorArguments.Count];
+				for( int i = 0; i < row.ctorArgs.Length; i++ )
+					row.ctorArgs[i] = FromTypedArgument( d.ConstructorArguments[i] );
+
+				row.namedArgs = new Dictionary<string, SerializedProxyField>();
+				foreach( CustomAttributeNamedArgument na in d.NamedArguments )
+					row.namedArgs[na.MemberName] = FromTypedArgument( na.TypedValue );
+				rows.Add( row );
+			}
+			return rows.ToArray();
+		}
+
+		private static SerializedProxyField FromTypedArgument( CustomAttributeTypedArgument a )
+		{
+			// An argument declared as object carries its real value as a nested typed argument.
+			if( a.Value is CustomAttributeTypedArgument inner )
+				return FromTypedArgument( inner );
+
+			SerializedProxyField f = new SerializedProxyField();
+			f.matchingInstanceId = -1;
+			switch( a.Value )
+			{
+			case null:
+				f.fieldType = (byte)ProxyFieldType.Empty;
+				break;
+			case string s:
+				f.fieldType = (byte)ProxyFieldType.String;
+				f.data = s;
+				break;
+			case Type t:
+				f.fieldType = (byte)ProxyFieldType.Type;
+				f.elementType = SerializedTypeDescriptorBuilder.FromNativeType( t );
+				break;
+			case IReadOnlyCollection<CustomAttributeTypedArgument> elems:
+				f.fieldType = (byte)ProxyFieldType.Array;
+				f.elementType = SerializedTypeDescriptorBuilder.FromNativeType( a.ArgumentType.GetElementType() );
+				f.arrayElements = new SerializedProxyField[elems.Count];
+				int n = 0;
+				foreach( CustomAttributeTypedArgument e in elems )
+					f.arrayElements[n++] = FromTypedArgument( e );
+				break;
+			default:
+				// Enums are stored as their underlying type, and char (not a StackType) as a ushort, like the interpreter does.
+				object v = a.ArgumentType.IsEnum ? Convert.ChangeType( a.Value, Enum.GetUnderlyingType( a.ArgumentType ) ) : a.Value;
+				if( v is char c ) v = (ushort)c;
+				f.fieldType = (byte)ProxyFieldType.Primitive;
+				f.primitiveValue.Unbox( v, StackElement.TypeToStackType[v.GetType().ToString()] );
+				break;
+			}
+			return f;
+		}
+	}
+#endif
 }

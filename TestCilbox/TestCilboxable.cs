@@ -1065,6 +1065,43 @@ namespace TestCilbox
 		public CycleChildBehaviour child;
 	}
 
+	[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method, AllowMultiple = true)]
+	public class AttributeProbeTarget : Attribute { }
+
+	public class CharProbeAttribute : Attribute
+	{
+		public CharProbeAttribute( char c, char[] cs ) { }
+	}
+
+	public class TypeProbeAttribute : Attribute
+	{
+		public TypeProbeAttribute( Type t, Type[] ts ) { }
+	}
+
+	[CharProbe( 'x', new char[] { 'a', 'b' } ), TypeProbe( typeof( string ), new Type[] { typeof( int ), typeof( object ) } )]
+	public class CharProbeTarget { }
+
+	public class MetadataProbeAttribute : Attribute
+	{
+		public MetadataProbeAttribute( string label, int[] numbers ) { }
+		public int Number;
+		public Type Kind { get; set; }
+	}
+
+	[Cilboxable, Serializable, MetadataProbe( "on class", new int[] { 1, 2 }, Number = 7 )]
+	public class MetadataProbeBehaviour : MonoBehaviour
+	{
+		[SerializeField] private int serializedPrivate;
+		[NonSerialized] public int nonSerializedPublic;
+		public readonly int readonlyPublic = 3;
+		[MetadataProbe( "on field", null, Kind = typeof( string ) )] public int probed;
+		[System.Runtime.CompilerServices.CompilerGenerated] public int generated;
+		private int plain;
+
+		[MetadataProbe( "on method", null )]
+		public void Probe() { }
+	}
+
 	[Cilboxable]
 	public class CycleChildBehaviour : MonoBehaviour
 	{

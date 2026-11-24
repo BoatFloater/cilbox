@@ -377,6 +377,7 @@ namespace TestCilbox
 			};
 
 			ValidateNegativeFieldsObjectIndex();
+			ValidateMetadataRoundTrip();
 
 			GameObject go = new GameObject("MyObjectToProxy");
 			TestCilboxBehaviour b = go.CreateComponent<TestCilboxBehaviour>();
@@ -419,6 +420,9 @@ namespace TestCilbox
 			GameObject getCompDriverGo = new GameObject("GetComponentDriverToProxy");
 			GetComponentDriver getCompDriver = getCompDriverGo.CreateComponent<GetComponentDriver>();
 			getCompDriver.rowHolder = getCompRowGo;
+
+			GameObject metadataProbeGo = new GameObject("MetadataProbeToProxy");
+			metadataProbeGo.CreateComponent<MetadataProbeBehaviour>();
 
 			GameObject secInheritsGo = new GameObject("SecInheritsProhibitedToProxy");
 			SecInheritsProhibited secInherits = secInheritsGo.CreateComponent<SecInheritsProhibited>();
@@ -999,7 +1003,124 @@ namespace TestCilbox
 			Validator.Set("CustomMethodByName Result", $"{(int)res}");
 			Validator.Validate("CustomMethodByName Result", "5");
 
+			ValidateMetadata(cb);
+
 			return -1 * Validator.NumValidationErrors();
+		}
+
+		private static void ValidateMetadata(Cilbox.Cilbox cb)
+		{
+			CilboxClass cc = cb.GetClass($"{nameof(TestCilbox)}.{nameof(MetadataProbeBehaviour)}");
+			int FieldIndex(string n) => Array.IndexOf(cc.instanceFieldNames, n);
+			const string probe = "TestCilbox.MetadataProbeAttribute";
+
+			Validator.Set("Meta Type Serializable", ((cc.typeFlags & TypeAttributes.Serializable) != 0).ToString());
+			Validator.Validate("Meta Type Serializable", "True");
+			// Pseudo-attributes are flags only, never custom attribute rows.
+			Validator.Set("Meta Type Serializable Not A Row", (!cc.HasTypeAttribute("System.SerializableAttribute")).ToString());
+			Validator.Validate("Meta Type Serializable Not A Row", "True");
+			Validator.Set("Meta Type Probe", cc.HasTypeAttribute(probe).ToString());
+			Validator.Validate("Meta Type Probe", "True");
+
+			CilboxCustomAttribute typeProbe = cc.customAttributes.First(a => a.AttributeTypeName == probe);
+			Validator.Set("Meta Probe Ctor String", (string)typeProbe.ConstructorArguments[0]);
+			Validator.Validate("Meta Probe Ctor String", "on class");
+			Validator.Set("Meta Probe Ctor Array", string.Join(",", ((object[])typeProbe.ConstructorArguments[1]).Select(e => $"{e}:{e.GetType().Name}")));
+			Validator.Validate("Meta Probe Ctor Array", "1:Int32,2:Int32");
+			KeyValuePair<string, object> numberArg = typeProbe.NamedArguments.Single();
+			Validator.Set("Meta Probe Named Field", $"{numberArg.Key}={numberArg.Value}:{numberArg.Value.GetType().Name}");
+			Validator.Validate("Meta Probe Named Field", "Number=7:Int32");
+
+			int serializedPrivate = FieldIndex("serializedPrivate");
+			Validator.Set("Meta SerializeField", cc.HasInstanceFieldAttribute(serializedPrivate, "UnityEngine.SerializeField").ToString());
+			Validator.Validate("Meta SerializeField", "True");
+			Validator.Set("Meta Private Flag", ((cc.instanceFieldFlags[serializedPrivate] & FieldAttributes.FieldAccessMask) == FieldAttributes.Private).ToString());
+			Validator.Validate("Meta Private Flag", "True");
+
+			int nonSerialized = FieldIndex("nonSerializedPublic");
+			Validator.Set("Meta NonSerialized Flag", ((cc.instanceFieldFlags[nonSerialized] & FieldAttributes.NotSerialized) != 0).ToString());
+			Validator.Validate("Meta NonSerialized Flag", "True");
+			Validator.Set("Meta NonSerialized Not A Row", (!cc.HasInstanceFieldAttribute(nonSerialized, "System.NonSerializedAttribute")).ToString());
+			Validator.Validate("Meta NonSerialized Not A Row", "True");
+
+			Validator.Set("Meta InitOnly Flag", ((cc.instanceFieldFlags[FieldIndex("readonlyPublic")] & FieldAttributes.InitOnly) != 0).ToString());
+			Validator.Validate("Meta InitOnly Flag", "True");
+
+			int probed = FieldIndex("probed");
+			CilboxCustomAttribute fieldProbe = cc.instanceFieldAttributes[probed].First(a => a.AttributeTypeName == probe);
+			Validator.Set("Meta Field Probe Null Array", (fieldProbe.ConstructorArguments[1] == null).ToString());
+			Validator.Validate("Meta Field Probe Null Array", "True");
+			Validator.Set("Meta Field Probe Named Property", $"{string.Join(",", fieldProbe.NamedArguments.Keys)}={(fieldProbe.NamedArguments["Kind"] as Type)?.FullName}");
+			Validator.Validate("Meta Field Probe Named Property", "Kind=System.String");
+
+			Validator.Set("Meta Plain No Attributes", (cc.instanceFieldAttributes[FieldIndex("plain")].Length == 0).ToString());
+			Validator.Validate("Meta Plain No Attributes", "True");
+
+			// Compiler-emitted attributes are real CIL rows and are kept.
+			Validator.Set("Meta CompilerGenerated Kept", cc.HasInstanceFieldAttribute(FieldIndex("generated"), "System.Runtime.CompilerServices.CompilerGeneratedAttribute").ToString());
+			Validator.Validate("Meta CompilerGenerated Kept", "True");
+			CilboxMethod probeMethod = cc.methods.First(m => m.methodName == "Probe");
+			Validator.Set("Meta Method Probe", probeMethod.HasAttribute(probe).ToString());
+			Validator.Validate("Meta Method Probe", "True");
+		}
+
+		private static void ValidateMetadataRoundTrip()
+		{
+			// Payloads from before the metadata existed carry none of the new keys and must still load.
+			SerializedField legacy = SerializedField.FromClassFieldSerializee(new Serializee(new Dictionary<string, Serializee>
+			{
+				["name"] = new Serializee("legacy"),
+				["type"] = new Serializee(new Dictionary<string, Serializee>
+				{
+					["a"] = new Serializee("System.Private.CoreLib"),
+					["n"] = new Serializee("System.Int32"),
+				}),
+			}));
+			Validator.Set("Meta Legacy Field", $"{(int)legacy.flags}/{legacy.customAttributes.Length}");
+			Validator.Validate("Meta Legacy Field", "0/0");
+
+			SerializedClass sc = new SerializedClass
+			{
+				className = "X",
+				staticFields = new SerializedField[0],
+				instanceFields = new SerializedField[0],
+				methods = new SerializedMethod[0],
+				baseClassNames = new string[0],
+				flags = TypeAttributes.Serializable | TypeAttributes.Public,
+				customAttributes = new[] { new SerializedCustomAttribute { attributeType = SerializedTypeDescriptorBuilder.FromNativeType(typeof(ObsoleteAttribute)) } },
+			};
+			SerializedClass back = SerializedClass.FromSerializee(sc.ToSerializee(), "X");
+			Validator.Set("Meta Class RoundTrip", $"{back.flags}/{back.customAttributes[0].attributeType.typeName}");
+			Validator.Validate("Meta Class RoundTrip", "Public, Serializable/System.ObsoleteAttribute");
+
+			SerializedEnum se = new SerializedEnum
+			{
+				enumName = "E",
+				flags = TypeAttributes.Public | TypeAttributes.Sealed,
+				underlyingType = SerializedTypeDescriptorBuilder.FromNativeType(typeof(int)),
+				values = new SerializedEnumValue[0],
+				customAttributes = new[] { new SerializedCustomAttribute { attributeType = SerializedTypeDescriptorBuilder.FromNativeType(typeof(FlagsAttribute)) } },
+			};
+			SerializedEnum backEnum = SerializedEnum.FromSerializee(se.ToSerializee(), "E");
+			Validator.Set("Meta Enum RoundTrip", $"{backEnum.flags}/{backEnum.customAttributes[0].attributeType.typeName}");
+			Validator.Validate("Meta Enum RoundTrip", "Public, Sealed/System.FlagsAttribute");
+
+			// Argument values survive the wire; enums come back as their underlying type.
+			SerializedCustomAttribute usageRow = SerializedCustomAttributeBuilder.FromMember(typeof(AttributeProbeTarget)).Single(a => a.attributeType.typeName == "System.AttributeUsageAttribute");
+			SerializedCustomAttribute usageBack = SerializedCustomAttribute.FromSerializee(usageRow.ToSerializee());
+			object enumArg = usageBack.ctorArgs[0].primitiveValue.Box();
+			Validator.Set("Meta Arg Enum", $"{enumArg}:{enumArg.GetType().Name}");
+			Validator.Validate("Meta Arg Enum", $"{(int)(AttributeTargets.Class | AttributeTargets.Method)}:Int32");
+			Validator.Set("Meta Arg Named Bool", $"{usageBack.namedArgs["AllowMultiple"].primitiveValue.Box()}");
+			Validator.Validate("Meta Arg Named Bool", "True");
+
+			// char is stored as a ushort; Type values and arrays keep their type descriptors.
+			SerializedCustomAttribute charBack = SerializedCustomAttribute.FromSerializee(SerializedCustomAttributeBuilder.FromMember(typeof(CharProbeTarget)).Single(a => a.attributeType.typeName == "TestCilbox.CharProbeAttribute").ToSerializee());
+			Validator.Set("Meta Arg Char", $"{charBack.ctorArgs[0].primitiveValue.Box()}:{charBack.ctorArgs[0].primitiveValue.Box().GetType().Name}/{string.Join(",", charBack.ctorArgs[1].arrayElements.Select(c => c.primitiveValue.Box()))}/{charBack.ctorArgs[1].elementType.typeName}");
+			Validator.Validate("Meta Arg Char", $"{(int)'x'}:UInt16/{(int)'a'},{(int)'b'}/System.Char");
+			SerializedCustomAttribute typeBack = SerializedCustomAttribute.FromSerializee(SerializedCustomAttributeBuilder.FromMember(typeof(CharProbeTarget)).Single(a => a.attributeType.typeName == "TestCilbox.TypeProbeAttribute").ToSerializee());
+			Validator.Set("Meta Arg Type", $"{(ProxyFieldType)typeBack.ctorArgs[0].fieldType}:{typeBack.ctorArgs[0].elementType.typeName}/{string.Join(",", typeBack.ctorArgs[1].arrayElements.Select(e => e.elementType.typeName))}");
+			Validator.Validate("Meta Arg Type", "Type:System.String/System.Int32,System.Object");
 		}
 
 		private static void ValidateNegativeFieldsObjectIndex()
